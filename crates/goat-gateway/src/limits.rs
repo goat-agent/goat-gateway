@@ -4,8 +4,19 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Window {
     pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
     pub used_percent: f64,
     pub resets_at_ms: Option<i64>,
+}
+
+impl Window {
+    fn applies_to(&self, scope: Option<&str>) -> bool {
+        match self.scope.as_deref() {
+            None => true,
+            Some(mine) => scope == Some(mine),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -19,9 +30,10 @@ impl Snapshot {
         self.windows.is_empty()
     }
 
-    pub fn pressure(&self) -> Option<f64> {
+    pub fn pressure_for(&self, scope: Option<&str>) -> Option<f64> {
         self.windows
             .iter()
+            .filter(|window| window.applies_to(scope))
             .map(|window| window.used_percent)
             .fold(None, |worst: Option<f64>, used| {
                 Some(worst.map_or(used, |value| value.max(used)))
@@ -55,42 +67,62 @@ pub fn parse(headers: &HeaderMap, now_ms: i64) -> Snapshot {
             .and_then(|value| value.to_str().ok())
             .and_then(|text| parse_reset(text, now_ms));
 
+        let (period, scope) = match period.split_once('_') {
+            Some((period, scope)) => (period, Some(scope.to_owned())),
+            None => (period, None),
+        };
+
         windows.push(Window {
-            label: match period {
-                "5h" => "5h".to_owned(),
-                "7d" => "weekly".to_owned(),
-                other => other.to_owned(),
-            },
+            label: label_for_period(period),
+            scope,
             used_percent: used,
             resets_at_ms,
         });
     }
 
-    for (prefix, label) in [("primary", "5h"), ("secondary", "weekly")] {
-        let used = headers
-            .get(format!("x-codex-{prefix}-used-percent").as_str())
-            .and_then(|value| value.to_str().ok())
-            .and_then(parse_utilization);
-        let Some(used) = used else { continue };
+    for bucket in codex_buckets(headers) {
+        for half in ["primary", "secondary"] {
+            let used = headers
+                .get(format!("x-{bucket}-{half}-used-percent").as_str())
+                .and_then(|value| value.to_str().ok())
+                .and_then(parse_utilization);
+            let Some(used) = used else { continue };
 
-        let resets_at_ms = headers
-            .get(format!("x-codex-{prefix}-reset-at").as_str())
-            .and_then(|value| value.to_str().ok())
-            .and_then(|text| text.parse::<i64>().ok())
-            .map(|seconds| seconds * 1000)
-            .or_else(|| {
-                headers
-                    .get(format!("x-codex-{prefix}-reset-after-seconds").as_str())
-                    .and_then(|value| value.to_str().ok())
-                    .and_then(|text| text.parse::<i64>().ok())
-                    .map(|seconds| now_ms + seconds * 1000)
+            let resets_at_ms = headers
+                .get(format!("x-{bucket}-{half}-reset-at").as_str())
+                .and_then(|value| value.to_str().ok())
+                .and_then(|text| text.parse::<i64>().ok())
+                .map(|seconds| seconds * 1000)
+                .or_else(|| {
+                    headers
+                        .get(format!("x-{bucket}-{half}-reset-after-seconds").as_str())
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(|text| text.parse::<i64>().ok())
+                        .map(|seconds| now_ms + seconds * 1000)
+                });
+
+            let label = headers
+                .get(format!("x-{bucket}-{half}-window-minutes").as_str())
+                .and_then(|value| value.to_str().ok())
+                .and_then(|text| text.trim().parse::<i64>().ok())
+                .map_or_else(
+                    || {
+                        if half == "primary" {
+                            "5h".to_owned()
+                        } else {
+                            "weekly".to_owned()
+                        }
+                    },
+                    label_for_minutes,
+                );
+
+            windows.push(Window {
+                label,
+                scope: (bucket != "codex").then(|| bucket.replace('-', "_")),
+                used_percent: used,
+                resets_at_ms,
             });
-
-        windows.push(Window {
-            label: label.to_owned(),
-            used_percent: used,
-            resets_at_ms,
-        });
+        }
     }
 
     let binding = headers
@@ -115,6 +147,40 @@ pub fn retry_after_ms(headers: &HeaderMap, now_ms: i64) -> Option<i64> {
         return Some(now_ms + seconds * 1000);
     }
     parse(headers, now_ms).soonest_reset()
+}
+
+fn codex_buckets(headers: &HeaderMap) -> Vec<String> {
+    let mut found: Vec<String> = headers
+        .keys()
+        .filter_map(|name| {
+            name.as_str()
+                .strip_suffix("-primary-used-percent")?
+                .strip_prefix("x-")
+                .map(str::to_owned)
+        })
+        .filter(|bucket| !bucket.starts_with("ratelimit"))
+        .collect();
+    found.sort();
+    found.dedup();
+    found
+}
+
+fn label_for_period(period: &str) -> String {
+    match period {
+        "5h" => "5h".to_owned(),
+        "7d" => "weekly".to_owned(),
+        other => other.to_owned(),
+    }
+}
+
+fn label_for_minutes(minutes: i64) -> String {
+    match minutes {
+        300 => "5h".to_owned(),
+        1440 => "daily".to_owned(),
+        10080 => "weekly".to_owned(),
+        43200 => "monthly".to_owned(),
+        other => format!("{other}m"),
+    }
 }
 
 fn parse_utilization(text: &str) -> Option<f64> {
@@ -156,6 +222,71 @@ mod tests {
             );
         }
         map
+    }
+
+    #[test]
+    fn a_model_scoped_window_carries_its_scope() {
+        let snapshot = parse(
+            &headers(&[
+                ("anthropic-ratelimit-unified-5h-utilization", "0.20"),
+                ("anthropic-ratelimit-unified-7d_fable-utilization", "1.0"),
+            ]),
+            NOW,
+        );
+
+        let fable = snapshot
+            .windows
+            .iter()
+            .find(|window| window.scope.as_deref() == Some("fable"))
+            .expect("the scoped window");
+        assert_eq!(fable.label, "weekly");
+        assert_eq!(fable.used_percent, 100.0);
+
+        assert_eq!(snapshot.pressure_for(Some("fable")), Some(100.0));
+        assert_eq!(snapshot.pressure_for(Some("sonnet")), Some(20.0));
+    }
+
+    #[test]
+    fn codex_buckets_are_discovered_by_suffix_not_by_a_fixed_list() {
+        let snapshot = parse(
+            &headers(&[
+                ("x-codex-primary-used-percent", "10"),
+                ("x-codex-primary-window-minutes", "300"),
+                ("x-codex-secondary-used-percent", "40"),
+                ("x-codex-secondary-window-minutes", "10080"),
+                ("x-codex-bengalfox-primary-used-percent", "95"),
+                ("x-codex-bengalfox-primary-window-minutes", "300"),
+            ]),
+            NOW,
+        );
+
+        let scopes: Vec<_> = snapshot
+            .windows
+            .iter()
+            .map(|window| {
+                (
+                    window.scope.clone(),
+                    window.label.clone(),
+                    window.used_percent,
+                )
+            })
+            .collect();
+
+        assert!(
+            scopes.contains(&(None, "5h".to_owned(), 10.0)),
+            "the default bucket keeps both halves: {scopes:?}"
+        );
+        assert!(
+            scopes.contains(&(None, "weekly".to_owned(), 40.0)),
+            "x-codex-secondary-* is the default bucket's second window, not a bucket: {scopes:?}"
+        );
+        assert!(
+            scopes.contains(&(Some("codex_bengalfox".to_owned()), "5h".to_owned(), 95.0)),
+            "only -primary-used-percent declares a bucket: {scopes:?}"
+        );
+
+        assert_eq!(snapshot.pressure_for(Some("codex_bengalfox")), Some(95.0));
+        assert_eq!(snapshot.pressure_for(None), Some(40.0));
     }
 
     #[test]
@@ -228,14 +359,14 @@ mod tests {
             ]),
             NOW,
         );
-        assert_eq!(snapshot.pressure(), Some(95.0));
+        assert_eq!(snapshot.pressure_for(None), Some(95.0));
     }
 
     #[test]
     fn no_headers_means_unknown_not_zero() {
         let snapshot = parse(&headers(&[]), NOW);
         assert!(snapshot.is_empty());
-        assert_eq!(snapshot.pressure(), None);
+        assert_eq!(snapshot.pressure_for(None), None);
     }
 
     #[test]

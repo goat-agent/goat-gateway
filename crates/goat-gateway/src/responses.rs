@@ -56,7 +56,12 @@ pub async fn handle(
     }
 
     let pinned = pinned_account(&request, &app);
-    let chosen = match pool::pick(&app.inner.store, "anthropic", pinned.as_deref()) {
+    let chosen = match pool::pick(
+        &app.inner.store,
+        "anthropic",
+        declared.limit_scope.as_deref(),
+        pinned.as_deref(),
+    ) {
         Ok(chosen) => chosen,
         Err(error) => {
             return responses_error(StatusCode::SERVICE_UNAVAILABLE, error.to_string());

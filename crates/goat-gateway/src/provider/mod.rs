@@ -54,6 +54,8 @@ pub struct Model {
     pub thinking: Thinking,
     pub max_tokens: u32,
     #[serde(default)]
+    pub limit_scope: Option<String>,
+    #[serde(default)]
     pub mid_conversation_system: bool,
     #[serde(default)]
     pub price: Option<Price>,

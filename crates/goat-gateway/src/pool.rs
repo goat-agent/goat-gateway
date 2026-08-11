@@ -25,7 +25,12 @@ pub enum PoolError {
     PinUnavailable { pinned: String, state: String },
 }
 
-pub fn pick(store: &Store, provider: &str, pinned: Option<&str>) -> Result<Chosen, PoolError> {
+pub fn pick(
+    store: &Store,
+    provider: &str,
+    scope: Option<&str>,
+    pinned: Option<&str>,
+) -> Result<Chosen, PoolError> {
     store.clear_expired_cooldowns()?;
     let accounts = store.accounts()?;
 
@@ -85,7 +90,7 @@ pub fn pick(store: &Store, provider: &str, pinned: Option<&str>) -> Result<Chose
                 .rate_limits(name)
                 .ok()
                 .flatten()
-                .and_then(|snapshot: Snapshot| snapshot.pressure())
+                .and_then(|snapshot: Snapshot| snapshot.pressure_for(scope))
                 .unwrap_or(f64::NEG_INFINITY)
         };
         pressure(&a.name)
@@ -138,6 +143,7 @@ mod tests {
         Snapshot {
             windows: vec![Window {
                 label: "5h".into(),
+                scope: None,
                 used_percent: used,
                 resets_at_ms: None,
             }],
@@ -146,8 +152,43 @@ mod tests {
     }
 
     #[test]
+    fn a_full_model_bucket_does_not_take_the_whole_account_away() {
+        let store = store();
+        store
+            .add_account("shared", "anthropic", "api_key", b"a")
+            .unwrap();
+        store
+            .set_rate_limits(
+                "shared",
+                &Snapshot {
+                    windows: vec![
+                        Window {
+                            label: "5h".into(),
+                            scope: None,
+                            used_percent: 20.0,
+                            resets_at_ms: None,
+                        },
+                        Window {
+                            label: "weekly".into(),
+                            scope: Some("fable".into()),
+                            used_percent: 100.0,
+                            resets_at_ms: None,
+                        },
+                    ],
+                    binding: None,
+                },
+            )
+            .unwrap();
+
+        let snapshot = store.rate_limits("shared").unwrap().unwrap();
+        assert_eq!(snapshot.pressure_for(Some("fable")), Some(100.0));
+        assert_eq!(snapshot.pressure_for(Some("sonnet")), Some(20.0));
+        assert_eq!(snapshot.pressure_for(None), Some(20.0));
+    }
+
+    #[test]
     fn an_empty_pool_says_so_plainly() {
-        let error = pick(&store(), "anthropic", None).unwrap_err();
+        let error = pick(&store(), "anthropic", None, None).unwrap_err();
         assert!(matches!(error, PoolError::NoneRegistered { .. }));
     }
 
@@ -160,7 +201,7 @@ mod tests {
                 .unwrap();
             store.set_rate_limits(name, &snapshot(used)).unwrap();
         }
-        assert_eq!(pick(&store, "anthropic", None).unwrap().name, "idle");
+        assert_eq!(pick(&store, "anthropic", None, None).unwrap().name, "idle");
     }
 
     #[test]
@@ -174,7 +215,10 @@ mod tests {
             .add_account("unknown", "anthropic", "api_key", b"b")
             .unwrap();
 
-        assert_eq!(pick(&store, "anthropic", None).unwrap().name, "unknown");
+        assert_eq!(
+            pick(&store, "anthropic", None, None).unwrap().name,
+            "unknown"
+        );
     }
 
     #[test]
@@ -189,13 +233,13 @@ mod tests {
         store
             .set_state("a", AccountState::RateLimited, Some(now() + 60_000))
             .unwrap();
-        assert_eq!(pick(&store, "anthropic", None).unwrap().name, "b");
+        assert_eq!(pick(&store, "anthropic", None, None).unwrap().name, "b");
 
         store
             .set_state("a", AccountState::RateLimited, Some(now() - 1))
             .unwrap();
         store.remove_account("b").unwrap();
-        assert_eq!(pick(&store, "anthropic", None).unwrap().name, "a");
+        assert_eq!(pick(&store, "anthropic", None, None).unwrap().name, "a");
     }
 
     #[test]
@@ -214,7 +258,9 @@ mod tests {
             .set_state("b", AccountState::SignInExpired, None)
             .unwrap();
 
-        let message = pick(&store, "anthropic", None).unwrap_err().to_string();
+        let message = pick(&store, "anthropic", None, None)
+            .unwrap_err()
+            .to_string();
         assert!(
             message.contains("a is rate limited for another"),
             "{message}"
@@ -235,7 +281,7 @@ mod tests {
         store.set_rate_limits("idle", &snapshot(1.0)).unwrap();
 
         assert_eq!(
-            pick(&store, "anthropic", Some("busy")).unwrap().name,
+            pick(&store, "anthropic", None, Some("busy")).unwrap().name,
             "busy"
         );
     }
@@ -253,7 +299,7 @@ mod tests {
             .set_state("busy", AccountState::RateLimited, Some(now() + 60_000))
             .unwrap();
 
-        let error = pick(&store, "anthropic", Some("busy")).unwrap_err();
+        let error = pick(&store, "anthropic", None, Some("busy")).unwrap_err();
         let message = error.to_string();
         assert!(matches!(error, PoolError::PinUnavailable { .. }));
         assert!(message.contains("restart its reasoning"), "{message}");
@@ -266,7 +312,7 @@ mod tests {
             .add_account("anthropic-one", "anthropic", "api_key", b"a")
             .unwrap();
         assert!(matches!(
-            pick(&store, "openai", None).unwrap_err(),
+            pick(&store, "openai", None, None).unwrap_err(),
             PoolError::NoneRegistered { .. }
         ));
     }
@@ -277,6 +323,9 @@ mod tests {
         store
             .add_account("a", "anthropic", "api_key", b"sk-live")
             .unwrap();
-        assert_eq!(pick(&store, "anthropic", None).unwrap().secret, b"sk-live");
+        assert_eq!(
+            pick(&store, "anthropic", None, None).unwrap().secret,
+            b"sk-live"
+        );
     }
 }

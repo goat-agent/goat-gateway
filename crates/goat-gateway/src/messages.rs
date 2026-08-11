@@ -28,7 +28,7 @@ pub async fn handle(
         .unwrap_or_default()
         .to_owned();
 
-    let chosen = match pool::pick(&app.inner.store, "anthropic", None) {
+    let chosen = match pool::pick(&app.inner.store, "anthropic", None, None) {
         Ok(chosen) => chosen,
         Err(error) => {
             return anthropic_error(

@@ -297,6 +297,7 @@ async fn a_second_turn_returns_to_the_account_that_minted_the_envelope() {
             &goat_gateway::limits::Snapshot {
                 windows: vec![goat_gateway::limits::Window {
                     label: "5h".into(),
+                    scope: None,
                     used_percent: 96.0,
                     resets_at_ms: None,
                 }],
