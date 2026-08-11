@@ -57,6 +57,7 @@ pub struct RequestRow {
     pub started_at: i64,
     pub person: Option<String>,
     pub client: Option<String>,
+    pub conversation: Option<String>,
     pub provider: String,
     pub account: Option<String>,
     pub model: String,
@@ -171,17 +172,17 @@ impl Store {
         let connection = self.connection.lock().expect("store mutex");
         connection.execute(
             "INSERT INTO requests (
-                 id, started_at, person, client, provider, account, model,
+                 id, started_at, person, client, conversation, provider, account, model,
                  ingress, egress, translated, status, error_kind,
                  ttft_ms, duration_ms,
                  input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
                  cost_micros, input_digest, output_digest, byte_identical, evidence, upstream_request_id
              ) VALUES (
-                 ?1, ?2, ?3, ?4, ?5, ?6, ?7,
-                 ?8, ?9, ?10, ?11, ?12,
-                 ?13, ?14,
-                 ?15, ?16, ?17, ?18, ?19,
-                 ?20, ?21, ?22, ?23, ?24, ?25
+                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+                 ?9, ?10, ?11, ?12, ?13,
+                 ?14, ?15,
+                 ?16, ?17, ?18, ?19, ?20,
+                 ?21, ?22, ?23, ?24, ?25, ?26
              )
              ON CONFLICT(id) DO UPDATE SET
                  status = excluded.status,
@@ -201,6 +202,7 @@ impl Store {
                 row.started_at,
                 row.person,
                 row.client,
+                row.conversation,
                 row.provider,
                 row.account,
                 row.model,
@@ -227,10 +229,24 @@ impl Store {
         Ok(())
     }
 
+    pub fn account_that_served(&self, conversation: &str) -> Result<Option<String>, StoreError> {
+        let connection = self.connection.lock().expect("store mutex");
+        let account = connection
+            .query_row(
+                "SELECT account FROM requests
+                 WHERE conversation = ?1 AND account IS NOT NULL AND status = 'ok'
+                 ORDER BY started_at DESC LIMIT 1",
+                params![conversation],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(account.flatten())
+    }
+
     pub fn recent_requests(&self, limit: usize) -> Result<Vec<RequestRow>, StoreError> {
         let connection = self.connection.lock().expect("store mutex");
         let mut statement = connection.prepare(
-            "SELECT id, started_at, person, client, provider, account, model,
+            "SELECT id, started_at, person, client, conversation, provider, account, model,
                     ingress, egress, translated, status, error_kind,
                     ttft_ms, duration_ms,
                     input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
@@ -244,31 +260,32 @@ impl Store {
                     started_at: row.get(1)?,
                     person: row.get(2)?,
                     client: row.get(3)?,
-                    provider: row.get(4)?,
-                    account: row.get(5)?,
-                    model: row.get(6)?,
-                    ingress: row.get(7)?,
-                    egress: row.get(8)?,
-                    translated: row.get::<_, i64>(9)? != 0,
-                    status: row.get(10)?,
-                    error_kind: row.get(11)?,
-                    ttft_ms: row.get(12)?,
-                    duration_ms: row.get(13)?,
+                    conversation: row.get(4)?,
+                    provider: row.get(5)?,
+                    account: row.get(6)?,
+                    model: row.get(7)?,
+                    ingress: row.get(8)?,
+                    egress: row.get(9)?,
+                    translated: row.get::<_, i64>(10)? != 0,
+                    status: row.get(11)?,
+                    error_kind: row.get(12)?,
+                    ttft_ms: row.get(13)?,
+                    duration_ms: row.get(14)?,
                     usage: Usage {
-                        input_tokens: row.get(14)?,
-                        output_tokens: row.get(15)?,
-                        cache_read_tokens: row.get(16)?,
-                        cache_write_tokens: row.get(17)?,
-                        reasoning_tokens: row.get(18)?,
+                        input_tokens: row.get(15)?,
+                        output_tokens: row.get(16)?,
+                        cache_read_tokens: row.get(17)?,
+                        cache_write_tokens: row.get(18)?,
+                        reasoning_tokens: row.get(19)?,
                     },
-                    cost_micros: row.get(19)?,
-                    input_digest: row.get(20)?,
-                    output_digest: row.get(21)?,
-                    byte_identical: row.get::<_, Option<i64>>(22)?.map(|flag| flag != 0),
+                    cost_micros: row.get(20)?,
+                    input_digest: row.get(21)?,
+                    output_digest: row.get(22)?,
+                    byte_identical: row.get::<_, Option<i64>>(23)?.map(|flag| flag != 0),
                     evidence: row
-                        .get::<_, Option<String>>(23)?
+                        .get::<_, Option<String>>(24)?
                         .and_then(|text| serde_json::from_str(&text).ok()),
-                    upstream_request_id: row.get(24)?,
+                    upstream_request_id: row.get(25)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -443,6 +460,7 @@ mod tests {
                     started_at: index as i64,
                     person: None,
                     client: None,
+                    conversation: None,
                     provider: "anthropic".into(),
                     account: None,
                     model: "claude-sonnet-5".into(),

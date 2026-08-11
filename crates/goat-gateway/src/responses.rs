@@ -57,11 +57,22 @@ pub async fn handle(
     }
 
     let pinned = pinned_account(&request, &app);
+    let conversation = goat_gateway_wire::identify(&request);
+    let prefer = conversation.as_deref().and_then(|conversation| {
+        app.inner
+            .store
+            .account_that_served(conversation)
+            .ok()
+            .flatten()
+    });
     let chosen = match pool::pick(
         &app.inner.store,
-        "anthropic",
-        declared.limit_scope.as_deref(),
-        pinned.as_deref(),
+        &pool::Want {
+            provider: "anthropic",
+            scope: declared.limit_scope.as_deref(),
+            pinned: pinned.as_deref(),
+            prefer: prefer.as_deref(),
+        },
     ) {
         Ok(chosen) => chosen,
         Err(error) => {
@@ -144,6 +155,7 @@ pub async fn handle(
         started_at: started,
         person: Some(caller.user_name.clone()),
         client: crate::messages::client_name(&headers),
+        conversation: conversation.clone(),
         provider: "anthropic".into(),
         account: Some(chosen.name.clone()),
         model: provenance.model.clone(),

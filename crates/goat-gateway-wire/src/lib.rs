@@ -1,3 +1,5 @@
+pub mod cache;
+pub mod conversation;
 pub mod digest;
 pub mod edit;
 pub mod envelope;
@@ -7,6 +9,8 @@ pub mod meter;
 pub mod responses_to_messages;
 pub mod sse;
 
+pub use cache::breakpoints;
+pub use conversation::identify;
 pub use digest::BodyDigest;
 pub use edit::{BodyEdit, EditError, HeaderEdit, Record, VerifyError, apply};
 pub use envelope::{EnvelopeError, Envelopes, Payload, Portability, Provenance, Sealed};

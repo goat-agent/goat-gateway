@@ -25,12 +25,31 @@ pub enum PoolError {
     PinUnavailable { pinned: String, state: String },
 }
 
-pub fn pick(
-    store: &Store,
-    provider: &str,
-    scope: Option<&str>,
-    pinned: Option<&str>,
-) -> Result<Chosen, PoolError> {
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Want<'a> {
+    pub provider: &'a str,
+    pub scope: Option<&'a str>,
+    pub pinned: Option<&'a str>,
+    pub prefer: Option<&'a str>,
+}
+
+impl<'a> Want<'a> {
+    pub fn from(provider: &'a str) -> Self {
+        Self {
+            provider,
+            ..Self::default()
+        }
+    }
+}
+
+pub fn pick(store: &Store, want: &Want<'_>) -> Result<Chosen, PoolError> {
+    let Want {
+        provider,
+        scope,
+        pinned,
+        prefer,
+    } = *want;
+
     store.clear_expired_cooldowns()?;
     let accounts = store.accounts()?;
 
@@ -65,6 +84,12 @@ pub fn pick(
         .iter()
         .filter(|account| account.state == AccountState::Active)
         .collect();
+
+    if let Some(prefer) = prefer
+        && usable.iter().any(|account| account.name == prefer)
+    {
+        return load(store, prefer);
+    }
 
     if usable.is_empty() {
         let detail = candidates
@@ -188,7 +213,7 @@ mod tests {
 
     #[test]
     fn an_empty_pool_says_so_plainly() {
-        let error = pick(&store(), "anthropic", None, None).unwrap_err();
+        let error = pick(&store(), &Want::from("anthropic")).unwrap_err();
         assert!(matches!(error, PoolError::NoneRegistered { .. }));
     }
 
@@ -201,7 +226,7 @@ mod tests {
                 .unwrap();
             store.set_rate_limits(name, &snapshot(used)).unwrap();
         }
-        assert_eq!(pick(&store, "anthropic", None, None).unwrap().name, "idle");
+        assert_eq!(pick(&store, &Want::from("anthropic")).unwrap().name, "idle");
     }
 
     #[test]
@@ -216,7 +241,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            pick(&store, "anthropic", None, None).unwrap().name,
+            pick(&store, &Want::from("anthropic")).unwrap().name,
             "unknown"
         );
     }
@@ -233,13 +258,13 @@ mod tests {
         store
             .set_state("a", AccountState::RateLimited, Some(now() + 60_000))
             .unwrap();
-        assert_eq!(pick(&store, "anthropic", None, None).unwrap().name, "b");
+        assert_eq!(pick(&store, &Want::from("anthropic")).unwrap().name, "b");
 
         store
             .set_state("a", AccountState::RateLimited, Some(now() - 1))
             .unwrap();
         store.remove_account("b").unwrap();
-        assert_eq!(pick(&store, "anthropic", None, None).unwrap().name, "a");
+        assert_eq!(pick(&store, &Want::from("anthropic")).unwrap().name, "a");
     }
 
     #[test]
@@ -258,7 +283,7 @@ mod tests {
             .set_state("b", AccountState::SignInExpired, None)
             .unwrap();
 
-        let message = pick(&store, "anthropic", None, None)
+        let message = pick(&store, &Want::from("anthropic"))
             .unwrap_err()
             .to_string();
         assert!(
@@ -281,8 +306,59 @@ mod tests {
         store.set_rate_limits("idle", &snapshot(1.0)).unwrap();
 
         assert_eq!(
-            pick(&store, "anthropic", None, Some("busy")).unwrap().name,
+            pick(
+                &store,
+                &Want {
+                    pinned: Some("busy"),
+                    ..Want::from("anthropic")
+                }
+            )
+            .unwrap()
+            .name,
             "busy"
+        );
+    }
+
+    #[test]
+    fn a_conversation_goes_back_to_the_account_holding_its_cache() {
+        let store = store();
+        store
+            .add_account("warm", "anthropic", "api_key", b"a")
+            .unwrap();
+        store.set_rate_limits("warm", &snapshot(60.0)).unwrap();
+        store
+            .add_account("cold", "anthropic", "api_key", b"b")
+            .unwrap();
+        store.set_rate_limits("cold", &snapshot(1.0)).unwrap();
+
+        let want = Want {
+            prefer: Some("warm"),
+            ..Want::from("anthropic")
+        };
+        assert_eq!(pick(&store, &want).unwrap().name, "warm");
+    }
+
+    #[test]
+    fn a_preference_gives_way_when_that_account_cannot_serve() {
+        let store = store();
+        store
+            .add_account("warm", "anthropic", "api_key", b"a")
+            .unwrap();
+        store
+            .add_account("cold", "anthropic", "api_key", b"b")
+            .unwrap();
+        store
+            .set_state("warm", AccountState::RateLimited, Some(now() + 60_000))
+            .unwrap();
+
+        let want = Want {
+            prefer: Some("warm"),
+            ..Want::from("anthropic")
+        };
+        assert_eq!(
+            pick(&store, &want).unwrap().name,
+            "cold",
+            "a warm cache is worth less than getting an answer at all"
         );
     }
 
@@ -299,7 +375,14 @@ mod tests {
             .set_state("busy", AccountState::RateLimited, Some(now() + 60_000))
             .unwrap();
 
-        let error = pick(&store, "anthropic", None, Some("busy")).unwrap_err();
+        let error = pick(
+            &store,
+            &Want {
+                pinned: Some("busy"),
+                ..Want::from("anthropic")
+            },
+        )
+        .unwrap_err();
         let message = error.to_string();
         assert!(matches!(error, PoolError::PinUnavailable { .. }));
         assert!(message.contains("restart its reasoning"), "{message}");
@@ -312,7 +395,7 @@ mod tests {
             .add_account("anthropic-one", "anthropic", "api_key", b"a")
             .unwrap();
         assert!(matches!(
-            pick(&store, "openai", None, None).unwrap_err(),
+            pick(&store, &Want::from("openai")).unwrap_err(),
             PoolError::NoneRegistered { .. }
         ));
     }
@@ -324,7 +407,7 @@ mod tests {
             .add_account("a", "anthropic", "api_key", b"sk-live")
             .unwrap();
         assert_eq!(
-            pick(&store, "anthropic", None, None).unwrap().secret,
+            pick(&store, &Want::from("anthropic")).unwrap().secret,
             b"sk-live"
         );
     }

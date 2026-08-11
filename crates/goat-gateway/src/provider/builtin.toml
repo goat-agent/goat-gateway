@@ -9,6 +9,7 @@ name = "claude-opus-5"
 limit_scope = "opus"
 thinking = "adaptive"
 max_tokens = 32000
+cache_min_tokens = 1024
 mid_conversation_system = true
 price = { input = 15000000, output = 75000000, cache_read = 1500000, cache_write = 18750000 }
 
@@ -17,6 +18,7 @@ name = "claude-sonnet-5"
 limit_scope = "sonnet"
 thinking = "adaptive"
 max_tokens = 32000
+cache_min_tokens = 1024
 mid_conversation_system = false
 price = { input = 3000000, output = 15000000, cache_read = 300000, cache_write = 3750000 }
 
@@ -25,6 +27,7 @@ name = "claude-fable-5"
 limit_scope = "fable"
 thinking = "adaptive"
 max_tokens = 32000
+cache_min_tokens = 1024
 mid_conversation_system = true
 
 [[provider.anthropic.models]]
@@ -32,12 +35,14 @@ name = "claude-opus-4-8"
 limit_scope = "opus"
 thinking = "adaptive"
 max_tokens = 32000
+cache_min_tokens = 1024
 mid_conversation_system = true
 
 [[provider.anthropic.models]]
 name = "claude-haiku-4-5"
 thinking = "budget"
 max_tokens = 8192
+cache_min_tokens = 2048
 mid_conversation_system = false
 price = { input = 1000000, output = 5000000, cache_read = 100000, cache_write = 1250000 }
 

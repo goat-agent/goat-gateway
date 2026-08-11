@@ -110,4 +110,10 @@ CREATE TABLE settings (
 );
 "#,
     ),
+    (
+        "0003_conversations",
+        r#"
+CREATE INDEX requests_by_conversation ON requests(conversation, started_at DESC);
+"#,
+    ),
 ];

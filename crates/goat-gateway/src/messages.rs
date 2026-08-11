@@ -5,7 +5,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::Response,
 };
-use goat_gateway_wire::{BodyDigest, BodyEdit, Record};
+use goat_gateway_wire::{BodyDigest, Record};
 use serde_json::Value;
 
 use crate::{
@@ -27,8 +27,29 @@ pub async fn handle(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned();
+    let declared = app.catalog().model("anthropic", &model).cloned();
+    let price = declared.as_ref().and_then(|declared| declared.price);
+    let limit_scope = declared
+        .as_ref()
+        .and_then(|declared| declared.limit_scope.clone());
+    let conversation = goat_gateway_wire::identify(&request);
+    let prefer = conversation.as_deref().and_then(|conversation| {
+        app.inner
+            .store
+            .account_that_served(conversation)
+            .ok()
+            .flatten()
+    });
 
-    let chosen = match pool::pick(&app.inner.store, "anthropic", None, None) {
+    let chosen = match pool::pick(
+        &app.inner.store,
+        &pool::Want {
+            provider: "anthropic",
+            scope: limit_scope.as_deref(),
+            pinned: None,
+            prefer: prefer.as_deref(),
+        },
+    ) {
         Ok(chosen) => chosen,
         Err(error) => {
             return anthropic_error(
@@ -59,7 +80,11 @@ pub async fn handle(
         }
     };
     let auth = prepared.auth;
-    let edits: Vec<BodyEdit> = Vec::new();
+    let cache_min_tokens = declared
+        .as_ref()
+        .and_then(|declared| declared.cache_min_tokens)
+        .unwrap_or(0);
+    let edits = goat_gateway_wire::breakpoints(&request, cache_min_tokens);
 
     let outgoing = match goat_gateway_wire::apply(&body, &edits) {
         Ok(bytes) => bytes,
@@ -101,16 +126,12 @@ pub async fn handle(
     let status = response.status().as_u16();
     crate::observe(&app, &chosen.name, status, response.headers());
 
-    let price = app
-        .catalog()
-        .model("anthropic", &model)
-        .and_then(|declared| declared.price);
-
     let row = RequestRow {
         id: crate::request_id(),
         started_at: started,
         person: Some(caller.user_name.clone()),
         client: client_name(&headers),
+        conversation: conversation.clone(),
         provider: "anthropic".into(),
         account: Some(chosen.name.clone()),
         model,

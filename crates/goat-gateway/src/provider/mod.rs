@@ -58,6 +58,8 @@ pub struct Model {
     #[serde(default)]
     pub mid_conversation_system: bool,
     #[serde(default)]
+    pub cache_min_tokens: Option<u32>,
+    #[serde(default)]
     pub price: Option<Price>,
 }
 
