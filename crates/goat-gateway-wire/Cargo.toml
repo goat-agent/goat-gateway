@@ -1,0 +1,22 @@
+[package]
+name = "goat-gateway-wire"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+# This crate understands protocols. It must never learn to talk to the network
+# or to a database — that boundary is what keeps the loss-detection tests fast
+# enough that they actually get run. Adding reqwest/sqlx/tokio here is the
+# moment this product starts silently dropping things. See docs/design-product.md.
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+chacha20poly1305 = { workspace = true }
+base64 = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

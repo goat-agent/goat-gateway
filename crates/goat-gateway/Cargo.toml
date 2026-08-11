@@ -1,0 +1,48 @@
+[package]
+name = "goat-gateway"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+default-run = "goat-gateway"
+
+[dependencies]
+goat-gateway-wire = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+axum = { version = "0.8", features = ["http2"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net"] }
+tower-http = { version = "0.6", features = ["trace"] }
+hyper = "1"
+reqwest = { version = "0.12", default-features = false, features = [
+  "rustls-tls",
+  "stream",
+  "http2",
+  "json",
+] }
+futures-util = "0.3"
+bytes = "1"
+base64 = { workspace = true }
+chacha20poly1305 = { workspace = true }
+sha2 = { workspace = true }
+rusqlite = { workspace = true }
+rand = { workspace = true }
+rust-embed = { workspace = true }
+mime_guess = { workspace = true }
+time = { workspace = true }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "goat-gateway"
+path = "src/main.rs"

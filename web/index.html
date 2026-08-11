@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>goat-gateway</title>
+    <link rel="stylesheet" href="/tokens.css" />
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <div class="layout">
+      <nav>
+        <div class="brand">goat-gateway</div>
+        <a href="#/overview">Overview</a>
+        <a href="#/accounts">Accounts</a>
+        <a href="#/requests">Requests</a>
+        <a href="#/usage">Usage</a>
+        <a href="#/connect">Connect</a>
+        <div class="spacer"></div>
+        <a href="#/settings">Settings</a>
+      </nav>
+      <main><div class="content" id="screen"></div></main>
+    </div>
+
+    <dialog id="add-account">
+      <h2>Add account</h2>
+      <form method="dialog" id="add-account-form">
+        <label for="account-provider">Provider</label>
+        <select id="account-provider" name="provider">
+          <option value="anthropic">Anthropic</option>
+        </select>
+        <label for="account-name">Name</label>
+        <input id="account-name" name="name" placeholder="Claude personal" autocomplete="off" />
+        <label for="account-method">How</label>
+        <select id="account-method" name="method">
+          <option value="api_key">API key</option>
+          <option value="signin">Sign in</option>
+        </select>
+        <div id="account-key-fields">
+          <label for="account-secret">API key</label>
+          <input id="account-secret" name="secret" placeholder="sk-ant-…" autocomplete="off" />
+        </div>
+        <div id="account-signin-fields" hidden>
+          <label for="account-mode">Sign-in flow</label>
+          <select id="account-mode" name="mode"></select>
+        </div>
+        <p class="error" id="add-account-error" hidden></p>
+        <div class="actions">
+          <button value="cancel" formnovalidate>Cancel</button>
+          <button value="save" id="add-account-save">Add</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="signin">
+      <h2 id="signin-title">Signing in</h2>
+      <p id="signin-detail" class="muted"></p>
+      <div id="signin-code-block" hidden>
+        <div class="mono" id="signin-user-code"></div>
+      </div>
+      <div id="signin-paste-block" hidden>
+        <label for="signin-pasted">Authorization code</label>
+        <input id="signin-pasted" autocomplete="off" placeholder="paste the code, or the whole redirect URL" />
+      </div>
+      <p class="error" id="signin-error" hidden></p>
+      <div class="actions">
+        <button type="button" id="signin-cancel">Cancel</button>
+        <button type="button" id="signin-finish" hidden>Finish</button>
+      </div>
+    </dialog>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,282 @@
+use crate::{
+    limits::Snapshot,
+    store::{AccountState, Store, StoreError, now},
+};
+
+#[derive(Debug, Clone)]
+pub struct Chosen {
+    pub name: String,
+    pub credential_kind: String,
+    pub secret: Vec<u8>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PoolError {
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    #[error("no account is registered for {provider}")]
+    NoneRegistered { provider: String },
+    #[error("every {provider} account is unavailable right now. {detail}")]
+    AllUnavailable { provider: String, detail: String },
+    #[error(
+        "this conversation carries reasoning state minted by account {pinned:?}, which is {state}. \
+         Sending it anywhere else would make the model restart its reasoning."
+    )]
+    PinUnavailable { pinned: String, state: String },
+}
+
+pub fn pick(store: &Store, provider: &str, pinned: Option<&str>) -> Result<Chosen, PoolError> {
+    store.clear_expired_cooldowns()?;
+    let accounts = store.accounts()?;
+
+    let candidates: Vec<_> = accounts
+        .iter()
+        .filter(|account| account.provider == provider)
+        .collect();
+    if candidates.is_empty() {
+        return Err(PoolError::NoneRegistered {
+            provider: provider.to_owned(),
+        });
+    }
+
+    if let Some(pinned) = pinned {
+        let account = candidates
+            .iter()
+            .find(|account| account.name == pinned)
+            .ok_or_else(|| PoolError::PinUnavailable {
+                pinned: pinned.to_owned(),
+                state: "no longer registered".to_owned(),
+            })?;
+        if account.state != AccountState::Active {
+            return Err(PoolError::PinUnavailable {
+                pinned: pinned.to_owned(),
+                state: describe(account.state, account.cooldown_until),
+            });
+        }
+        return load(store, pinned);
+    }
+
+    let mut usable: Vec<_> = candidates
+        .iter()
+        .filter(|account| account.state == AccountState::Active)
+        .collect();
+
+    if usable.is_empty() {
+        let detail = candidates
+            .iter()
+            .map(|account| {
+                format!(
+                    "{} is {}",
+                    account.name,
+                    describe(account.state, account.cooldown_until)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(PoolError::AllUnavailable {
+            provider: provider.to_owned(),
+            detail,
+        });
+    }
+
+    usable.sort_by(|a, b| {
+        let pressure = |name: &str| {
+            store
+                .rate_limits(name)
+                .ok()
+                .flatten()
+                .and_then(|snapshot: Snapshot| snapshot.pressure())
+                .unwrap_or(f64::NEG_INFINITY)
+        };
+        pressure(&a.name)
+            .partial_cmp(&pressure(&b.name))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+
+    load(store, &usable[0].name)
+}
+
+fn load(store: &Store, name: &str) -> Result<Chosen, PoolError> {
+    let accounts = store.accounts()?;
+    let row = accounts
+        .into_iter()
+        .find(|account| account.name == name)
+        .ok_or_else(|| StoreError::UnknownAccount(name.to_owned()))?;
+    Ok(Chosen {
+        name: row.name,
+        credential_kind: row.credential_kind,
+        secret: store.secret(name)?,
+    })
+}
+
+fn describe(state: AccountState, cooldown_until: Option<i64>) -> String {
+    match state {
+        AccountState::Active => "available".to_owned(),
+        AccountState::Disabled => "turned off".to_owned(),
+        AccountState::SignInExpired => "signed out and needs a new login".to_owned(),
+        AccountState::RateLimited => match cooldown_until {
+            Some(at) => {
+                let seconds = ((at - now()) / 1000).max(0);
+                format!("rate limited for another {seconds}s")
+            }
+            None => "rate limited".to_owned(),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::limits::Window;
+
+    fn store() -> Store {
+        Store::in_memory(&[1u8; 32]).unwrap()
+    }
+
+    fn snapshot(used: f64) -> Snapshot {
+        Snapshot {
+            windows: vec![Window {
+                label: "5h".into(),
+                used_percent: used,
+                resets_at_ms: None,
+            }],
+            binding: None,
+        }
+    }
+
+    #[test]
+    fn an_empty_pool_says_so_plainly() {
+        let error = pick(&store(), "anthropic", None).unwrap_err();
+        assert!(matches!(error, PoolError::NoneRegistered { .. }));
+    }
+
+    #[test]
+    fn the_least_pressured_account_wins() {
+        let store = store();
+        for (name, used) in [("busy", 91.0), ("idle", 12.0), ("middling", 55.0)] {
+            store
+                .add_account(name, "anthropic", "api_key", name.as_bytes())
+                .unwrap();
+            store.set_rate_limits(name, &snapshot(used)).unwrap();
+        }
+        assert_eq!(pick(&store, "anthropic", None).unwrap().name, "idle");
+    }
+
+    #[test]
+    fn an_account_with_no_reported_limit_is_tried_first() {
+        let store = store();
+        store
+            .add_account("known", "anthropic", "api_key", b"a")
+            .unwrap();
+        store.set_rate_limits("known", &snapshot(10.0)).unwrap();
+        store
+            .add_account("unknown", "anthropic", "api_key", b"b")
+            .unwrap();
+
+        assert_eq!(pick(&store, "anthropic", None).unwrap().name, "unknown");
+    }
+
+    #[test]
+    fn cooling_accounts_are_skipped_and_recovered_accounts_return() {
+        let store = store();
+        store
+            .add_account("a", "anthropic", "api_key", b"a")
+            .unwrap();
+        store
+            .add_account("b", "anthropic", "api_key", b"b")
+            .unwrap();
+        store
+            .set_state("a", AccountState::RateLimited, Some(now() + 60_000))
+            .unwrap();
+        assert_eq!(pick(&store, "anthropic", None).unwrap().name, "b");
+
+        store
+            .set_state("a", AccountState::RateLimited, Some(now() - 1))
+            .unwrap();
+        store.remove_account("b").unwrap();
+        assert_eq!(pick(&store, "anthropic", None).unwrap().name, "a");
+    }
+
+    #[test]
+    fn when_nothing_is_usable_the_error_names_every_reason() {
+        let store = store();
+        store
+            .add_account("a", "anthropic", "api_key", b"a")
+            .unwrap();
+        store
+            .add_account("b", "anthropic", "api_key", b"b")
+            .unwrap();
+        store
+            .set_state("a", AccountState::RateLimited, Some(now() + 90_000))
+            .unwrap();
+        store
+            .set_state("b", AccountState::SignInExpired, None)
+            .unwrap();
+
+        let message = pick(&store, "anthropic", None).unwrap_err().to_string();
+        assert!(
+            message.contains("a is rate limited for another"),
+            "{message}"
+        );
+        assert!(message.contains("b is signed out"), "{message}");
+    }
+
+    #[test]
+    fn a_pinned_account_is_used_even_when_it_is_not_the_calmest() {
+        let store = store();
+        store
+            .add_account("busy", "anthropic", "api_key", b"a")
+            .unwrap();
+        store.set_rate_limits("busy", &snapshot(99.0)).unwrap();
+        store
+            .add_account("idle", "anthropic", "api_key", b"b")
+            .unwrap();
+        store.set_rate_limits("idle", &snapshot(1.0)).unwrap();
+
+        assert_eq!(
+            pick(&store, "anthropic", Some("busy")).unwrap().name,
+            "busy"
+        );
+    }
+
+    #[test]
+    fn a_pinned_account_that_is_down_fails_rather_than_silently_moving() {
+        let store = store();
+        store
+            .add_account("busy", "anthropic", "api_key", b"a")
+            .unwrap();
+        store
+            .add_account("idle", "anthropic", "api_key", b"b")
+            .unwrap();
+        store
+            .set_state("busy", AccountState::RateLimited, Some(now() + 60_000))
+            .unwrap();
+
+        let error = pick(&store, "anthropic", Some("busy")).unwrap_err();
+        let message = error.to_string();
+        assert!(matches!(error, PoolError::PinUnavailable { .. }));
+        assert!(message.contains("restart its reasoning"), "{message}");
+    }
+
+    #[test]
+    fn providers_do_not_borrow_each_others_accounts() {
+        let store = store();
+        store
+            .add_account("anthropic-one", "anthropic", "api_key", b"a")
+            .unwrap();
+        assert!(matches!(
+            pick(&store, "openai", None).unwrap_err(),
+            PoolError::NoneRegistered { .. }
+        ));
+    }
+
+    #[test]
+    fn the_chosen_account_carries_its_decrypted_secret() {
+        let store = store();
+        store
+            .add_account("a", "anthropic", "api_key", b"sk-live")
+            .unwrap();
+        assert_eq!(pick(&store, "anthropic", None).unwrap().secret, b"sk-live");
+    }
+}

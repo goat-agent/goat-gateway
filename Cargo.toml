@@ -1,0 +1,30 @@
+[workspace]
+resolver = "3"
+members = ["crates/goat-gateway-wire", "crates/goat-gateway"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.90"
+
+[workspace.dependencies]
+goat-gateway-wire = { path = "crates/goat-gateway-wire" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value", "preserve_order"] }
+sha2 = "0.10"
+chacha20poly1305 = "0.10"
+base64 = "0.22"
+thiserror = "2"
+rusqlite = { version = "0.37", features = ["bundled"] }
+rand = "0.9"
+rust-embed = "8"
+mime_guess = "2"
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+todo = "warn"
+dbg_macro = "warn"

@@ -1,0 +1,80 @@
+:root {
+  color-scheme: dark;
+
+  --hairline: 1px;
+
+  --bg-base: #0a0a0b;
+  --bg-panel: #0f0f11;
+  --bg-raised: #151518;
+  --bg-overlay: #1b1b1f;
+
+  --line-subtle: rgba(255, 255, 255, 0.06);
+  --line: rgba(255, 255, 255, 0.1);
+  --line-strong: rgba(255, 255, 255, 0.16);
+
+  --text: #f4f4f5;
+  --text-secondary: #a1a1aa;
+  --text-muted: #71717a;
+
+  --good: #0ca30c;
+  --warning: #fab219;
+  --serious: #ec835a;
+  --critical: #d03b3b;
+
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-5: #d55181;
+  --series-6: #008300;
+  --series-7: #9085e9;
+  --series-8: #e66767;
+
+  --radius: 6px;
+  --radius-lg: 8px;
+
+  --font-sans: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  --font-mono: "Commit Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --micro: 11px;
+  --small: 12px;
+  --code: 13px;
+  --base: 14px;
+  --heading: 16px;
+
+  --row-height: 36px;
+  --sidebar-width: 208px;
+  --content-max: 1180px;
+}
+
+@media (min-resolution: 192dpi) {
+  :root {
+    --hairline: 0.5px;
+  }
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg-base: #fcfcfc;
+  --bg-panel: #f7f7f8;
+  --bg-raised: #f1f1f3;
+  --bg-overlay: #ffffff;
+
+  --line-subtle: rgba(0, 0, 0, 0.07);
+  --line: rgba(0, 0, 0, 0.11);
+  --line-strong: rgba(0, 0, 0, 0.18);
+
+  --text: #18181b;
+  --text-secondary: #52525b;
+  --text-muted: #8b8b93;
+
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --series-5: #e87ba4;
+  --series-6: #008300;
+  --series-7: #4a3aa7;
+  --series-8: #e34948;
+}
