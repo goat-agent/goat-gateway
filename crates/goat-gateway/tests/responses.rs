@@ -73,29 +73,32 @@ data: {"type":"message_stop"}
 #[derive(Clone, Default)]
 struct Seen {
     body: Arc<Mutex<Option<Bytes>>>,
+    api_key: Arc<Mutex<Option<String>>>,
 }
 
-async fn upstream_handler(State(seen): State<Seen>, body: Bytes) -> Response {
+impl Seen {
+    /// Which account served the last request. Accounts are registered with
+    /// distinct secrets, so the presented credential names the account.
+    fn serving_account(&self) -> Option<String> {
+        self.api_key.lock().unwrap().clone()
+    }
+}
+
+async fn upstream_handler(
+    State(seen): State<Seen>,
+    headers: axum::http::HeaderMap,
+    body: Bytes,
+) -> Response {
     *seen.body.lock().unwrap() = Some(body);
+    *seen.api_key.lock().unwrap() = headers
+        .get("x-api-key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
     Response::builder()
         .status(200)
         .header("content-type", "text/event-stream")
         .body(Body::from(anthropic_sse()))
         .unwrap()
-}
-
-fn gateway_app(upstream: SocketAddr, envelope_key: [u8; 32]) -> (App, String) {
-    let store = Store::in_memory(&[7u8; 32]).unwrap();
-    store
-        .add_account("personal", "anthropic", "api_key", b"provider-key")
-        .unwrap();
-    let user = store.add_user("jmo").unwrap();
-    let issued = store.issue_key(&user.id, "test").unwrap();
-    store.set_admin_key("gwa_test-admin").unwrap();
-    (
-        App::new(store, envelope_key, format!("http://{upstream}")),
-        issued.secret,
-    )
 }
 
 async fn serve(router: Router) -> SocketAddr {
@@ -113,9 +116,16 @@ struct Harness {
     gateway: SocketAddr,
     seen: Seen,
     key: String,
+    app: App,
 }
 
 async fn harness() -> Harness {
+    build_harness(&[("personal", b"provider-key")]).await
+}
+
+/// A gateway whose pool holds several accounts, each with its own secret so
+/// the upstream can tell them apart.
+async fn build_harness(accounts: &[(&str, &[u8])]) -> Harness {
     let seen = Seen::default();
     let upstream_addr = serve(
         Router::new()
@@ -124,10 +134,25 @@ async fn harness() -> Harness {
     )
     .await;
 
-    let (app, key) = gateway_app(upstream_addr, ENVELOPE_KEY);
-    let gateway = serve(app.router()).await;
+    let store = Store::in_memory(&[7u8; 32]).unwrap();
+    for (name, secret) in accounts {
+        store
+            .add_account(name, "anthropic", "api_key", secret)
+            .unwrap();
+    }
+    let user = store.add_user("jmo").unwrap();
+    let issued = store.issue_key(&user.id, "test").unwrap();
+    store.set_admin_key("gwa_test-admin").unwrap();
 
-    Harness { gateway, seen, key }
+    let app = App::new(store, ENVELOPE_KEY, format!("http://{upstream_addr}"));
+    let gateway = serve(app.clone().router()).await;
+
+    Harness {
+        gateway,
+        seen,
+        key: issued.secret,
+        app,
+    }
 }
 
 async fn call(harness: &Harness, request: Value) -> (u16, String) {
@@ -245,6 +270,71 @@ async fn the_envelope_survives_a_second_turn_through_the_gateway() {
     assert_eq!(
         block["signature"], SIGNATURE,
         "the provider's signature must come back byte for byte"
+    );
+}
+
+/// The envelope only buys anything if the conversation goes back to the
+/// account that minted it. With more than one account in the pool, and with
+/// the reasoning item sitting where a real client puts it — in the middle of
+/// the input, not at the end — the pin has to survive.
+#[tokio::test]
+async fn a_second_turn_returns_to_the_account_that_minted_the_envelope() {
+    let harness = build_harness(&[("alpha", b"key-alpha"), ("beta", b"key-beta")]).await;
+
+    let (_, body) = call(&harness, simple_request()).await;
+    let minted_by = harness.seen.serving_account().unwrap();
+    assert_eq!(
+        minted_by, "key-alpha",
+        "with equal pressure the pool orders by name"
+    );
+
+    let reasoning = events(&body)
+        .into_iter()
+        .find(|(kind, data)| {
+            kind == "response.output_item.done" && data["item"]["type"] == "reasoning"
+        })
+        .expect("a reasoning item")
+        .1["item"]
+        .clone();
+
+    // Make the minting account the one the pool would now avoid, so that
+    // picking it again can only be the pin talking.
+    harness
+        .app
+        .store()
+        .set_rate_limits(
+            "alpha",
+            &goat_gateway::limits::Snapshot {
+                windows: vec![goat_gateway::limits::Window {
+                    label: "5h".into(),
+                    used_percent: 96.0,
+                    resets_at_ms: None,
+                }],
+                binding: None,
+            },
+        )
+        .unwrap();
+
+    let (status, _) = call(
+        &harness,
+        json!({
+            "model": "claude-sonnet-5",
+            "stream": true,
+            "input": [
+                { "type": "message", "role": "user", "content": "hello" },
+                reasoning,
+                { "type": "message", "role": "user", "content": "go on" },
+            ],
+        }),
+    )
+    .await;
+
+    assert_eq!(status, 200, "the pinned account is still usable");
+    assert_eq!(
+        harness.seen.serving_account().unwrap(),
+        "key-alpha",
+        "reasoning state is bound to the account that issued it, so the turn \
+         must go back there even though the pool would rather use beta"
     );
 }
 
