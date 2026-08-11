@@ -77,8 +77,6 @@ struct Seen {
 }
 
 impl Seen {
-    /// Which account served the last request. Accounts are registered with
-    /// distinct secrets, so the presented credential names the account.
     fn serving_account(&self) -> Option<String> {
         self.api_key.lock().unwrap().clone()
     }
@@ -123,8 +121,6 @@ async fn harness() -> Harness {
     build_harness(&[("personal", b"provider-key")]).await
 }
 
-/// A gateway whose pool holds several accounts, each with its own secret so
-/// the upstream can tell them apart.
 async fn build_harness(accounts: &[(&str, &[u8])]) -> Harness {
     let seen = Seen::default();
     let upstream_addr = serve(
@@ -273,10 +269,6 @@ async fn the_envelope_survives_a_second_turn_through_the_gateway() {
     );
 }
 
-/// The envelope only buys anything if the conversation goes back to the
-/// account that minted it. With more than one account in the pool, and with
-/// the reasoning item sitting where a real client puts it — in the middle of
-/// the input, not at the end — the pin has to survive.
 #[tokio::test]
 async fn a_second_turn_returns_to_the_account_that_minted_the_envelope() {
     let harness = build_harness(&[("alpha", b"key-alpha"), ("beta", b"key-beta")]).await;
@@ -297,8 +289,6 @@ async fn a_second_turn_returns_to_the_account_that_minted_the_envelope() {
         .1["item"]
         .clone();
 
-    // Make the minting account the one the pool would now avoid, so that
-    // picking it again can only be the pin talking.
     harness
         .app
         .store()

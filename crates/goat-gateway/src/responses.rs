@@ -255,12 +255,6 @@ fn nonce_seed() -> [u8; 8] {
     nanos.to_le_bytes()
 }
 
-/// The account that minted the most recent reasoning state in this request.
-///
-/// Scanned newest-first, and every item without an envelope is skipped rather
-/// than ending the scan: a real multi-turn request ends with the new user
-/// message or a tool result, so the reasoning items are always somewhere in
-/// the middle.
 fn pinned_account(request: &Value, app: &App) -> Option<String> {
     let items = request.get("input")?.as_array()?;
     for item in items.iter().rev() {
