@@ -138,6 +138,29 @@ pub fn parse(headers: &HeaderMap, now_ms: i64) -> Snapshot {
     Snapshot { windows, binding }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    Fine,
+    Transient,
+    Exhausted { until: i64 },
+    SignedOut,
+}
+
+pub fn classify(status: u16, headers: &HeaderMap, snapshot: &Snapshot) -> Verdict {
+    match status {
+        401 | 403 => Verdict::SignedOut,
+        429 if snapshot.is_empty() && !headers.contains_key("retry-after") => Verdict::Transient,
+        429 => Verdict::Exhausted {
+            until: retry_after_ms(headers, now()).unwrap_or_else(|| now() + 60_000),
+        },
+        _ => Verdict::Fine,
+    }
+}
+
+fn now() -> i64 {
+    crate::store::now()
+}
+
 pub fn retry_after_ms(headers: &HeaderMap, now_ms: i64) -> Option<i64> {
     if let Some(seconds) = headers
         .get("retry-after")
@@ -222,6 +245,34 @@ mod tests {
             );
         }
         map
+    }
+
+    #[test]
+    fn a_rejection_wearing_a_429_does_not_cost_the_account_its_place() {
+        let bare = headers(&[]);
+        assert_eq!(
+            classify(429, &bare, &Snapshot::default()),
+            Verdict::Transient,
+            "a limit the provider did not report is not a limit we can schedule against"
+        );
+
+        let reported = headers(&[("anthropic-ratelimit-unified-5h-utilization", "1.0")]);
+        let snapshot = parse(&reported, NOW);
+        assert!(matches!(
+            classify(429, &reported, &snapshot),
+            Verdict::Exhausted { .. }
+        ));
+
+        assert_eq!(
+            classify(
+                429,
+                &headers(&[("retry-after", "30")]),
+                &Snapshot::default()
+            ),
+            Verdict::Exhausted {
+                until: crate::store::now() + 30_000
+            }
+        );
     }
 
     #[test]

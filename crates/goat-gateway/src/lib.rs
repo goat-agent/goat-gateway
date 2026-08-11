@@ -220,21 +220,19 @@ pub(crate) fn observe(app: &App, account: &str, status: u16, headers: &axum::htt
         let _ = app.inner.store.set_rate_limits(account, &snapshot);
     }
 
-    match status {
-        429 => {
-            let until = limits::retry_after_ms(headers, store::now())
-                .unwrap_or_else(|| store::now() + 60_000);
+    match limits::classify(status, headers, &snapshot) {
+        limits::Verdict::Exhausted { until } => {
             let _ =
                 app.inner
                     .store
                     .set_state(account, store::AccountState::RateLimited, Some(until));
         }
-        401 | 403 => {
+        limits::Verdict::SignedOut => {
             let _ = app
                 .inner
                 .store
                 .set_state(account, store::AccountState::SignInExpired, None);
         }
-        _ => {}
+        limits::Verdict::Transient | limits::Verdict::Fine => {}
     }
 }
