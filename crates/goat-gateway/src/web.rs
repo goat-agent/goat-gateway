@@ -9,7 +9,7 @@ use rust_embed::Embed;
 use crate::App;
 
 #[derive(Embed)]
-#[folder = "../../web"]
+#[folder = "../../web/dist"]
 struct Assets;
 
 pub fn router() -> Router<App> {
@@ -22,10 +22,10 @@ async fn index() -> Response {
 
 async fn asset(uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
-    if path.is_empty() {
-        return serve("index.html");
+    if path.starts_with("api/") || path.starts_with("v1/") {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
     }
-    if Assets::get(path).is_none() {
+    if path.is_empty() || Assets::get(path).is_none() {
         return serve("index.html");
     }
     serve(path)
