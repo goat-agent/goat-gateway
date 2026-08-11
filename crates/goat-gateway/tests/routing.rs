@@ -372,3 +372,27 @@ async fn a_turn_that_did_not_ask_to_stream_still_gets_an_answer() {
     assert_eq!(whole["content"][2]["input"]["cmd"], "ls");
     assert_eq!(whole["usage"]["cache_read_input_tokens"], 800);
 }
+
+#[tokio::test]
+async fn testing_an_account_sends_a_real_request_and_says_what_came_back() {
+    let harness = harness(&[("work", "openai")]).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/api/accounts/work/test", harness.gateway))
+        .header("cookie", "goat_admin=gwa_test-admin")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    let reached: Value = response.json().await.unwrap();
+    assert_eq!(reached["ok"], true);
+    assert_eq!(reached["status"], 200);
+    assert_eq!(reached["model"], "gpt-5");
+    assert!(reached["took_ms"].as_i64().is_some());
+    assert_eq!(
+        harness.reached().as_deref(),
+        Some("/v1/responses"),
+        "a test that does not send a request tests nothing"
+    );
+}

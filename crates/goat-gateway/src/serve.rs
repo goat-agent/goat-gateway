@@ -32,6 +32,9 @@ pub struct Ready {
 }
 
 pub fn pinned_account(incoming: &Incoming) -> Option<String> {
+    if let Some(account) = incoming.app.turns().account_for(&incoming.headers) {
+        return Some(account);
+    }
     const OPAQUE: &[&str] = &["encrypted_content", "signature", "reasoning_state"];
     let request: Value = serde_json::from_slice(&incoming.body).ok()?;
     let mut found = None;

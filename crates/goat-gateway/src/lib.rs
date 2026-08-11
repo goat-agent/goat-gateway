@@ -7,10 +7,12 @@ pub mod messages;
 pub mod oauth;
 pub mod pool;
 pub mod pricing;
+pub mod probe;
 pub mod provider;
 pub mod responses;
 pub mod serve;
 pub mod store;
+pub mod turns;
 pub mod upstream;
 pub mod web;
 
@@ -38,6 +40,7 @@ pub(crate) struct Inner {
     pub(crate) catalog: crate::provider::Catalog,
     pub(crate) sessions: oauth::Sessions,
     pub(crate) announcer: events::Announcer,
+    pub(crate) turns: turns::Turns,
 }
 
 impl App {
@@ -50,12 +53,17 @@ impl App {
                 catalog,
                 sessions: oauth::Sessions::default(),
                 announcer: events::Announcer::default(),
+                turns: turns::Turns::default(),
             }),
         }
     }
 
     pub fn store(&self) -> &Store {
         &self.inner.store
+    }
+
+    pub fn turns(&self) -> &turns::Turns {
+        &self.inner.turns
     }
 
     pub fn announcer(&self) -> &events::Announcer {
@@ -280,6 +288,7 @@ pub(crate) fn request_id() -> String {
 }
 
 pub(crate) fn observe(app: &App, account: &str, status: u16, headers: &axum::http::HeaderMap) {
+    app.turns().minted(headers, account);
     let snapshot = limits::parse(headers, store::now());
     if !snapshot.is_empty() {
         let _ = app.inner.store.set_rate_limits(account, &snapshot);

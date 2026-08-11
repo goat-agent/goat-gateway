@@ -157,6 +157,7 @@ pub fn router() -> Router<App> {
         .route("/api/accounts", get(accounts).post(add_account))
         .route("/api/accounts/{name}", delete(remove_account))
         .route("/api/accounts/{name}/state", post(set_state))
+        .route("/api/accounts/{name}/test", post(test_account))
         .route("/api/requests", get(requests))
         .route("/api/requests/{id}", get(one_request))
         .route("/api/usage", get(usage))
@@ -288,6 +289,13 @@ async fn add_account(State(app): State<App>, Json(body): Json<NewAccount>) -> Re
 async fn remove_account(State(app): State<App>, Path(name): Path<String>) -> Response {
     match app.store().remove_account(&name) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => failed(error.to_string()),
+    }
+}
+
+async fn test_account(State(app): State<App>, Path(name): Path<String>) -> Response {
+    match crate::probe::reach(&app, &name).await {
+        Ok(reached) => Json(json!(reached)).into_response(),
         Err(error) => failed(error.to_string()),
     }
 }
