@@ -101,6 +101,11 @@ pub async fn handle(
     let status = response.status().as_u16();
     crate::observe(&app, &chosen.name, status, response.headers());
 
+    let price = app
+        .catalog()
+        .model("anthropic", &model)
+        .and_then(|declared| declared.price);
+
     let row = RequestRow {
         id: crate::request_id(),
         started_at: started,
@@ -137,7 +142,19 @@ pub async fn handle(
     };
     let _ = app.inner.store.record_request(&row);
 
-    crate::relay(response)
+    if !(200..300).contains(&status) {
+        return crate::relay(response);
+    }
+
+    crate::relay_metered(
+        response,
+        Some(crate::Settle {
+            app: app.clone(),
+            row,
+            started,
+            price,
+        }),
+    )
 }
 
 pub(crate) fn client_name(headers: &HeaderMap) -> Option<String> {

@@ -20,6 +20,7 @@ pub async fn handle(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let started = now();
     let request: Value = match serde_json::from_slice(&body) {
         Ok(value) => value,
         Err(error) => {
@@ -138,9 +139,9 @@ pub async fn handle(
         return crate::relay(upstream);
     }
 
-    let _ = app.inner.store.record_request(&crate::store::RequestRow {
+    let row = crate::store::RequestRow {
         id: crate::request_id(),
-        started_at: now(),
+        started_at: started,
         person: Some(caller.user_name.clone()),
         client: crate::messages::client_name(&headers),
         provider: "anthropic".into(),
@@ -168,7 +169,16 @@ pub async fn handle(
             .get("request-id")
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned),
+    };
+    let _ = app.inner.store.record_request(&row);
+
+    let settle = Some(crate::Settle {
+        app: app.clone(),
+        row,
+        started,
+        price: declared.price,
     });
+    let meter = goat_gateway_wire::Meter::default();
 
     tracing::info!(
         moved = translated.mapping.moved,
@@ -189,23 +199,39 @@ pub async fn handle(
     );
 
     let stream = futures_util::stream::unfold(
-        (upstream.bytes_stream(), translator, false),
-        |(mut upstream, mut translator, done)| async move {
+        (upstream.bytes_stream(), translator, meter, settle, false),
+        |(mut upstream, mut translator, mut meter, mut settle, done)| async move {
             if done {
                 return None;
             }
+            let mut close = |meter: &goat_gateway_wire::Meter| {
+                if let Some(settle) = settle.take() {
+                    settle.finish(meter);
+                }
+            };
             match upstream.next().await {
                 Some(Ok(bytes)) => {
+                    meter.observe(&bytes);
                     let out = translator.push(&bytes);
-                    Some((Ok(Bytes::from(out)), (upstream, translator, false)))
+                    Some((
+                        Ok(Bytes::from(out)),
+                        (upstream, translator, meter, settle, false),
+                    ))
                 }
-                Some(Err(error)) => Some((
-                    Err(std::io::Error::other(error)),
-                    (upstream, translator, true),
-                )),
+                Some(Err(error)) => {
+                    close(&meter);
+                    Some((
+                        Err(std::io::Error::other(error)),
+                        (upstream, translator, meter, settle, true),
+                    ))
+                }
                 None => {
+                    close(&meter);
                     let tail = translator.finish();
-                    Some((Ok(Bytes::from(tail)), (upstream, translator, true)))
+                    Some((
+                        Ok(Bytes::from(tail)),
+                        (upstream, translator, meter, settle, true),
+                    ))
                 }
             }
         },

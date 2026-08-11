@@ -330,6 +330,68 @@ async fn a_second_turn_returns_to_the_account_that_minted_the_envelope() {
 }
 
 #[tokio::test]
+async fn what_the_stream_actually_used_is_recorded_once_it_ends() {
+    let harness = harness().await;
+    let (status, body) = call(&harness, simple_request()).await;
+    assert_eq!(status, 200);
+    assert!(!body.is_empty());
+
+    let row = harness
+        .app
+        .store()
+        .recent_requests(10)
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("a recorded request");
+
+    assert_eq!(row.usage.input_tokens, Some(10));
+    assert_eq!(row.usage.output_tokens, Some(8));
+    assert_eq!(row.usage.cache_read_tokens, Some(200));
+    assert!(row.duration_ms.is_some());
+    assert_eq!(row.status, "ok");
+
+    let sonnet = harness
+        .app
+        .catalog()
+        .model("anthropic", "claude-sonnet-5")
+        .unwrap()
+        .price
+        .unwrap();
+    let expected = 10 * sonnet.input / 1_000_000
+        + 8 * sonnet.output / 1_000_000
+        + 200 * sonnet.cache_read / 1_000_000;
+    assert_eq!(row.cost_micros, Some(expected));
+}
+
+#[tokio::test]
+async fn a_model_with_no_published_price_costs_nothing_rather_than_zero() {
+    let harness = harness().await;
+    let (status, _) = call(
+        &harness,
+        json!({
+            "model": "claude-fable-5",
+            "stream": true,
+            "input": [{ "type": "message", "role": "user", "content": "hello" }],
+        }),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    let row = harness
+        .app
+        .store()
+        .recent_requests(10)
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("a recorded request");
+
+    assert_eq!(row.usage.input_tokens, Some(10));
+    assert_eq!(row.cost_micros, None);
+}
+
+#[tokio::test]
 async fn an_unregistered_model_is_named_not_guessed() {
     let harness = harness().await;
     let (status, body) = call(

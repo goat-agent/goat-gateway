@@ -89,6 +89,10 @@ impl App {
 }
 
 pub(crate) fn relay(response: reqwest::Response) -> Response {
+    relay_metered(response, None)
+}
+
+pub(crate) fn relay_metered(response: reqwest::Response, settle: Option<Settle>) -> Response {
     let status =
         StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
 
@@ -102,9 +106,77 @@ pub(crate) fn relay(response: reqwest::Response) -> Response {
         }
     }
 
+    let body = match settle {
+        None => axum::body::Body::from_stream(response.bytes_stream()),
+        Some(settle) => axum::body::Body::from_stream(metered(response.bytes_stream(), settle)),
+    };
+
     builder
-        .body(axum::body::Body::from_stream(response.bytes_stream()))
+        .body(body)
         .unwrap_or_else(|error| gateway_error(format!("could not relay response: {error}")))
+}
+
+pub(crate) struct Settle {
+    pub app: App,
+    pub row: store::RequestRow,
+    pub started: i64,
+    pub price: Option<provider::Price>,
+}
+
+impl Settle {
+    fn finish(mut self, meter: &goat_gateway_wire::Meter) {
+        let seen = meter.usage();
+        self.row.usage = store::Usage {
+            input_tokens: seen.input,
+            output_tokens: seen.output,
+            cache_read_tokens: seen.cache_read,
+            cache_write_tokens: seen.cache_write,
+            reasoning_tokens: seen.reasoning,
+        };
+        self.row.cost_micros = self
+            .price
+            .filter(|_| !seen.is_empty())
+            .map(|price| pricing::cost_micros(price, &self.row.usage));
+        self.row.duration_ms = Some(store::now() - self.started);
+
+        if let Some(kind) = meter.failure() {
+            self.row.status = "error".into();
+            self.row.error_kind = Some(kind.to_owned());
+        }
+
+        let _ = self.app.inner.store.record_request(&self.row);
+    }
+}
+
+fn metered(
+    upstream: impl futures_util::Stream<Item = reqwest::Result<bytes::Bytes>> + Send + 'static,
+    settle: Settle,
+) -> impl futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static {
+    use futures_util::StreamExt as _;
+
+    let state = (
+        Box::pin(upstream),
+        goat_gateway_wire::Meter::default(),
+        Some(settle),
+    );
+    futures_util::stream::unfold(state, |(mut upstream, mut meter, settle)| async move {
+        match upstream.next().await {
+            Some(Ok(bytes)) => {
+                meter.observe(&bytes);
+                Some((Ok(bytes), (upstream, meter, settle)))
+            }
+            Some(Err(error)) => {
+                if let Some(settle) = settle {
+                    settle.finish(&meter);
+                }
+                Some((Err(std::io::Error::other(error)), (upstream, meter, None)))
+            }
+            None => {
+                settle?.finish(&meter);
+                None
+            }
+        }
+    })
 }
 
 pub(crate) fn gateway_error(message: String) -> Response {
