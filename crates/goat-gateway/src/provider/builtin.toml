@@ -49,5 +49,13 @@ price = { input = 1000000, output = 5000000, cache_read = 100000, cache_write = 
 [provider.openai]
 label = "OpenAI"
 limits = "headers"
-endpoints = [{ wire = "responses", url = "https://api.openai.com/v1/responses" }]
-models = []
+endpoints = [
+  { wire = "responses", url = "https://api.openai.com/v1/responses" },
+  { wire = "chat", url = "https://api.openai.com/v1/chat/completions" },
+]
+
+[[provider.openai.models]]
+name = "gpt-5"
+
+[[provider.openai.models]]
+name = "gpt-5-codex"

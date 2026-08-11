@@ -3,16 +3,19 @@ use axum::{
     body::{Body, Bytes},
     extract::State,
     http::{HeaderMap, HeaderValue, StatusCode},
-    response::{IntoResponse, Response},
+    response::Response,
 };
 use futures_util::StreamExt as _;
 use goat_gateway_wire::{
     Provenance, StreamTarget, StreamTranslator,
-    responses_to_messages::{Target, translate},
+    responses_to_messages::{Target, translate as into_messages},
 };
-use serde_json::Value;
 
-use crate::{App, gateway_error, pool, provider::Wire, store::now, upstream::forward_headers};
+use crate::{
+    App, gateway_error,
+    provider::{Model, Wire},
+    serve::{self, Incoming, Ready},
+};
 
 pub async fn handle(
     State(app): State<App>,
@@ -20,97 +23,50 @@ pub async fn handle(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let started = now();
-    let request: Value = match serde_json::from_slice(&body) {
-        Ok(value) => value,
-        Err(error) => {
-            return responses_error(StatusCode::BAD_REQUEST, format!("invalid JSON: {error}"));
-        }
-    };
+    serve::dispatch(app, caller, headers, body, Wire::Responses).await
+}
 
-    let model = request
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let Some(declared) = app.catalog().model("anthropic", model) else {
-        let known = app
-            .catalog()
-            .get("anthropic")
-            .map(|provider| provider.model_names().join(", "))
-            .unwrap_or_default();
-        return responses_error(
-            StatusCode::BAD_REQUEST,
-            format!("model {model:?} is not registered on this gateway. Known models: {known}"),
-        );
-    };
-    let target_model = declared.target();
-
-    if !request
+pub(crate) async fn translate(incoming: Incoming, ready: Ready) -> Response {
+    if !ready
+        .request
         .get("stream")
-        .and_then(Value::as_bool)
+        .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
     {
-        return responses_error(
+        return serve::reject(
+            incoming.wire,
             StatusCode::BAD_REQUEST,
-            "this gateway serves the Responses API in streaming mode only; set stream: true".into(),
+            "translating between formats needs a stream to translate; set stream: true".into(),
         );
     }
 
-    let pinned = pinned_account(&request, &app);
-    let conversation = goat_gateway_wire::identify(&request);
-    let prefer = conversation.as_deref().and_then(|conversation| {
-        app.inner
-            .store
-            .account_that_served(conversation)
-            .ok()
-            .flatten()
-    });
-    let chosen = match pool::pick(
-        &app.inner.store,
-        &pool::Want {
-            provider: "anthropic",
-            scope: declared.limit_scope.as_deref(),
-            pinned: pinned.as_deref(),
-            prefer: prefer.as_deref(),
-        },
-    ) {
-        Ok(chosen) => chosen,
-        Err(error) => {
-            return responses_error(StatusCode::SERVICE_UNAVAILABLE, error.to_string());
-        }
+    let (Some(declared), Some(target)) = (
+        ready.route.model.clone(),
+        ready.route.model.as_ref().and_then(Model::target),
+    ) else {
+        return serve::reject(
+            incoming.wire,
+            StatusCode::BAD_REQUEST,
+            "this model is not declared well enough to translate".into(),
+        );
     };
-    let prepared = match crate::oauth::prepare(
-        &app.inner.store,
-        &crate::oauth::Client::with_http(app.inner.client.clone()),
-        &chosen.name,
-        "anthropic",
-        &chosen.credential_kind,
-        &chosen.secret,
-    )
-    .await
-    {
-        Ok(prepared) => prepared,
-        Err(error) => {
-            return responses_error(StatusCode::SERVICE_UNAVAILABLE, error.to_string());
-        }
-    };
-    let auth = prepared.auth;
 
     let provenance = Provenance {
-        provider: "anthropic".into(),
-        account: chosen.name.clone(),
-        model: target_model.name.clone(),
+        provider: ready.route.provider.clone(),
+        account: ready.account.clone(),
+        model: declared.name.clone(),
     };
-
     let target = Target {
-        model: target_model,
+        model: target,
         provenance: provenance.clone(),
         stream_thinking: true,
     };
 
-    let translated = match translate(&body, &target, &app.inner.envelopes) {
+    let translated = match into_messages(&incoming.body, &target, &incoming.app.inner.envelopes) {
         Ok(translated) => translated,
-        Err(error) => return responses_error(StatusCode::BAD_REQUEST, error.to_string()),
+        Err(error) => {
+            return serve::reject(incoming.wire, StatusCode::BAD_REQUEST, error.to_string());
+        }
     };
 
     if translated.mapping.lost_anything() {
@@ -120,16 +76,16 @@ pub async fn handle(
         );
     }
 
-    let (mut upstream_headers, _) = forward_headers(&headers, &auth);
-    upstream_headers.insert("content-type", HeaderValue::from_static("application/json"));
-    upstream_headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
-    upstream_headers.remove("accept");
+    let (mut headers, _) = serve::outgoing_headers(&incoming, &ready);
+    headers.insert("content-type", HeaderValue::from_static("application/json"));
+    headers.remove("accept");
 
-    let sent = app
+    let sent = incoming
+        .app
         .inner
         .client
-        .post(upstream_url(&app, prepared.base_url))
-        .headers(upstream_headers)
+        .post(serve::endpoint_url(&ready))
+        .headers(headers)
         .body(translated.body)
         .send()
         .await;
@@ -140,8 +96,8 @@ pub async fn handle(
     };
 
     crate::observe(
-        &app,
-        &chosen.name,
+        &incoming.app,
+        &ready.account,
         upstream.status().as_u16(),
         upstream.headers(),
     );
@@ -150,47 +106,19 @@ pub async fn handle(
         return crate::relay(upstream);
     }
 
-    let row = crate::store::RequestRow {
-        id: crate::request_id(),
-        started_at: started,
-        person: Some(caller.user_name.clone()),
-        client: crate::messages::client_name(&headers),
-        conversation: conversation.clone(),
-        provider: "anthropic".into(),
-        account: Some(chosen.name.clone()),
-        model: provenance.model.clone(),
-        ingress: "responses".into(),
-        egress: "messages".into(),
-        translated: true,
-        status: "ok".into(),
-        error_kind: None,
-        ttft_ms: None,
-        duration_ms: None,
-        usage: crate::store::Usage::default(),
-        cost_micros: None,
-        input_digest: None,
-        output_digest: None,
-        byte_identical: Some(false),
-        evidence: Some(serde_json::json!({
-            "moved": translated.mapping.moved,
-            "added": translated.mapping.added,
-            "dropped": translated.mapping.dropped,
-        })),
-        upstream_request_id: upstream
-            .headers()
-            .get("request-id")
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned),
-    };
-    let _ = app.inner.store.record_request(&row);
-
-    let settle = Some(crate::Settle {
-        app: app.clone(),
-        row,
-        started,
-        price: declared.price,
-    });
-    let meter = goat_gateway_wire::Meter::default();
+    let mut row = serve::opened(&incoming, &ready, None);
+    row.byte_identical = Some(false);
+    row.evidence = Some(serde_json::json!({
+        "moved": translated.mapping.moved,
+        "added": translated.mapping.added,
+        "dropped": translated.mapping.dropped,
+    }));
+    row.upstream_request_id = upstream
+        .headers()
+        .get("request-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let _ = incoming.app.store().record_request(&row);
 
     tracing::info!(
         moved = translated.mapping.moved,
@@ -200,6 +128,12 @@ pub async fn handle(
         "responses",
     );
 
+    let settle = Some(crate::Settle {
+        app: incoming.app.clone(),
+        row,
+        started: ready.started,
+        price: ready.route.price(),
+    });
     let translator = StreamTranslator::new(
         StreamTarget {
             response_id: format!("resp_{}", request_id()),
@@ -207,8 +141,9 @@ pub async fn handle(
             provenance,
             nonce_seed: nonce_seed(),
         },
-        app.inner.envelopes.clone(),
+        incoming.app.inner.envelopes.clone(),
     );
+    let meter = goat_gateway_wire::Meter::default();
 
     let stream = futures_util::stream::unfold(
         (upstream.bytes_stream(), translator, meter, settle, false),
@@ -261,18 +196,6 @@ pub async fn handle(
         .unwrap_or_else(|error| gateway_error(format!("could not open the stream: {error}")))
 }
 
-fn responses_error(status: StatusCode, message: String) -> Response {
-    let body = serde_json::json!({
-        "error": {
-            "type": "invalid_request_error",
-            "message": message,
-            "code": Value::Null,
-            "param": Value::Null,
-        }
-    });
-    (status, axum::Json(body)).into_response()
-}
-
 fn request_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
@@ -289,29 +212,4 @@ fn nonce_seed() -> [u8; 8] {
         .map(|d| d.as_nanos() as u64)
         .unwrap_or_default();
     nanos.to_le_bytes()
-}
-
-pub(crate) fn upstream_url(app: &App, override_base: Option<&str>) -> String {
-    match override_base {
-        Some(base) => format!("{}/v1/messages", base.trim_end_matches('/')),
-        None => app
-            .catalog()
-            .get("anthropic")
-            .and_then(|provider| provider.endpoint(Wire::Messages))
-            .map(|endpoint| endpoint.url.clone())
-            .unwrap_or_default(),
-    }
-}
-
-fn pinned_account(request: &Value, app: &App) -> Option<String> {
-    let items = request.get("input")?.as_array()?;
-    for item in items.iter().rev() {
-        let Some(blob) = item.get("encrypted_content").and_then(Value::as_str) else {
-            continue;
-        };
-        if let Ok(sealed) = app.inner.envelopes.open(blob) {
-            return Some(sealed.provenance.account);
-        }
-    }
-    None
 }

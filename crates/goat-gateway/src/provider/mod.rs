@@ -13,6 +13,30 @@ pub enum Wire {
     Chat,
 }
 
+impl Wire {
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Messages => "messages",
+            Self::Responses => "responses",
+            Self::Chat => "chat",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Messages => "Messages",
+            Self::Responses => "Responses",
+            Self::Chat => "Chat Completions",
+        }
+    }
+}
+
+impl std::fmt::Display for Wire {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Endpoint {
@@ -51,26 +75,28 @@ impl From<Thinking> for ThinkingStyle {
 #[serde(deny_unknown_fields)]
 pub struct Model {
     pub name: String,
-    pub thinking: Thinking,
-    pub max_tokens: u32,
     #[serde(default)]
     pub limit_scope: Option<String>,
-    #[serde(default)]
-    pub mid_conversation_system: bool,
     #[serde(default)]
     pub cache_min_tokens: Option<u32>,
     #[serde(default)]
     pub price: Option<Price>,
+    #[serde(default)]
+    pub thinking: Option<Thinking>,
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+    #[serde(default)]
+    pub mid_conversation_system: bool,
 }
 
 impl Model {
-    pub fn target(&self) -> TargetModel {
-        TargetModel {
+    pub fn target(&self) -> Option<TargetModel> {
+        Some(TargetModel {
             name: self.name.clone(),
-            thinking: self.thinking.into(),
-            default_max_tokens: self.max_tokens,
+            thinking: self.thinking?.into(),
+            default_max_tokens: self.max_tokens?,
             mid_conversation_system: self.mid_conversation_system,
-        }
+        })
     }
 }
 
@@ -101,6 +127,10 @@ fn no_limits() -> Limits {
     Limits::None
 }
 
+pub fn translatable(from: Wire, to: Wire) -> bool {
+    matches!((from, to), (Wire::Responses, Wire::Messages))
+}
+
 fn path_of(url: &str) -> &str {
     let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
     rest.find('/').map_or("", |at| &rest[at..])
@@ -117,6 +147,48 @@ impl Provider {
 
     pub fn model(&self, name: &str) -> Option<&Model> {
         self.models.iter().find(|model| model.name == name)
+    }
+
+    pub fn reachable(&self, ingress: Wire) -> bool {
+        self.endpoints
+            .iter()
+            .any(|endpoint| endpoint.wire == ingress || translatable(ingress, endpoint.wire))
+    }
+
+    pub fn route(
+        &self,
+        ingress: Wire,
+        model: &str,
+        declared: Option<Model>,
+    ) -> Result<Route, Unroutable> {
+        let carry = |endpoint: &Endpoint| Route {
+            provider: self.id.clone(),
+            headers: self.headers.clone(),
+            endpoint: endpoint.clone(),
+            model: declared.clone(),
+        };
+
+        if let Some(endpoint) = self.endpoint(ingress) {
+            return Ok(carry(endpoint));
+        }
+        let Some(endpoint) = self
+            .endpoints
+            .iter()
+            .find(|endpoint| translatable(ingress, endpoint.wire))
+        else {
+            return Err(Unroutable::NoTranslation {
+                provider: self.label.clone(),
+                wire: ingress,
+            });
+        };
+        if declared.as_ref().and_then(Model::target).is_none() {
+            return Err(Unroutable::Undeclared {
+                model: model.to_owned(),
+                wire: endpoint.wire,
+                known: self.model_names().join(", "),
+            });
+        }
+        Ok(carry(endpoint))
     }
 
     pub fn model_names(&self) -> Vec<&str> {
@@ -200,6 +272,107 @@ impl Catalog {
     pub fn model(&self, provider: &str, model: &str) -> Option<&Model> {
         self.get(provider)?.model(model)
     }
+
+    pub fn route(
+        &self,
+        ingress: Wire,
+        model: &str,
+        available: &[String],
+    ) -> Result<Route, Unroutable> {
+        if let Some((provider, declared)) = self
+            .iter()
+            .find_map(|provider| Some((provider, provider.model(model)?)))
+        {
+            return provider.route(ingress, model, Some(declared.clone()));
+        }
+
+        let registered: Vec<&Provider> = self
+            .iter()
+            .filter(|provider| available.contains(&provider.id))
+            .collect();
+
+        let native: Vec<&Provider> = registered
+            .iter()
+            .copied()
+            .filter(|provider| provider.speaks(ingress))
+            .collect();
+        let reachable: Vec<&Provider> = registered
+            .into_iter()
+            .filter(|provider| provider.reachable(ingress))
+            .collect();
+
+        let shortlist = if native.is_empty() { reachable } else { native };
+        match shortlist.as_slice() {
+            [] => Err(Unroutable::NobodySpeaks { wire: ingress }),
+            [only] => only.route(ingress, model, None),
+            several => Err(Unroutable::Ambiguous {
+                model: model.to_owned(),
+                candidates: several
+                    .iter()
+                    .map(|provider| provider.label.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" and "),
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Route {
+    pub provider: String,
+    pub headers: BTreeMap<String, String>,
+    pub endpoint: Endpoint,
+    pub model: Option<Model>,
+}
+
+impl Route {
+    pub fn translates_from(&self, ingress: Wire) -> bool {
+        self.endpoint.wire != ingress
+    }
+
+    pub fn cache_min_tokens(&self) -> u32 {
+        if self.endpoint.wire != Wire::Messages {
+            return 0;
+        }
+        self.model
+            .as_ref()
+            .and_then(|model| model.cache_min_tokens)
+            .unwrap_or(0)
+    }
+
+    pub fn limit_scope(&self) -> Option<&str> {
+        self.model.as_ref()?.limit_scope.as_deref()
+    }
+
+    pub fn price(&self) -> Option<Price> {
+        self.model.as_ref()?.price
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum Unroutable {
+    #[error("no account is registered with a provider that serves the {wire} format")]
+    NobodySpeaks { wire: Wire },
+    #[error(
+        "{provider} does not serve the {wire} format, and this gateway cannot yet translate into \
+         anything it does serve"
+    )]
+    NoTranslation { provider: String, wire: Wire },
+    #[error(
+        "model {model:?} is not declared, and {candidates} could each serve it. \
+         Declare the model in config.toml, or keep accounts for only one of them."
+    )]
+    Ambiguous { model: String, candidates: String },
+    #[error(
+        "model {model:?} has to be translated into {wire} to be served, and translating needs it \
+         declared with thinking and max_tokens, so the gateway knows how it reasons and how much \
+         it may write. Declared models: {known}"
+    )]
+    Undeclared {
+        model: String,
+        wire: Wire,
+        known: String,
+    },
 }
 
 #[cfg(test)]
@@ -219,8 +392,8 @@ mod tests {
         let haiku = catalog.model("anthropic", "claude-haiku-4-5").unwrap();
         let sonnet = catalog.model("anthropic", "claude-sonnet-5").unwrap();
 
-        assert_eq!(haiku.thinking, Thinking::Budget);
-        assert_eq!(sonnet.thinking, Thinking::Adaptive);
+        assert_eq!(haiku.thinking, Some(Thinking::Budget));
+        assert_eq!(sonnet.thinking, Some(Thinking::Adaptive));
         assert!(!sonnet.mid_conversation_system);
         assert!(
             catalog
@@ -253,6 +426,81 @@ mod tests {
                 .unwrap()
                 .price
                 .is_some()
+        );
+    }
+
+    fn both() -> Vec<String> {
+        vec!["anthropic".to_owned(), "openai".to_owned()]
+    }
+
+    #[test]
+    fn a_model_goes_to_the_provider_that_declares_it() {
+        let catalog = Catalog::builtin();
+        let route = catalog
+            .route(Wire::Responses, "gpt-5", &both())
+            .expect("openai declares gpt-5");
+        assert_eq!(route.provider, "openai");
+        assert!(!route.translates_from(Wire::Responses));
+
+        let route = catalog
+            .route(Wire::Responses, "claude-sonnet-5", &both())
+            .expect("anthropic declares claude-sonnet-5");
+        assert_eq!(route.provider, "anthropic");
+        assert!(
+            route.translates_from(Wire::Responses),
+            "anthropic serves Messages, so a Responses request has to be translated"
+        );
+    }
+
+    #[test]
+    fn a_model_that_shipped_after_us_still_reaches_the_provider_that_speaks_the_format() {
+        let catalog = Catalog::builtin();
+        let route = catalog
+            .route(Wire::Responses, "gpt-6-that-shipped-today", &both())
+            .expect("openai speaks Responses natively and anthropic does not");
+        assert_eq!(route.provider, "openai");
+        assert!(route.model.is_none());
+        assert!(!route.translates_from(Wire::Responses));
+
+        let route = catalog
+            .route(Wire::Messages, "claude-sonnet-6", &both())
+            .expect("only anthropic speaks Messages");
+        assert_eq!(route.provider, "anthropic");
+        assert!(!route.translates_from(Wire::Messages));
+    }
+
+    #[test]
+    fn an_undeclared_model_that_needs_translating_is_refused_with_what_is_known() {
+        let catalog = Catalog::builtin();
+        let error = catalog
+            .route(
+                Wire::Responses,
+                "claude-sonnet-6",
+                &["anthropic".to_owned()],
+            )
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(matches!(error, Unroutable::Undeclared { .. }));
+        assert!(message.contains("claude-sonnet-6"), "{message}");
+        assert!(message.contains("claude-sonnet-5"), "{message}");
+    }
+
+    #[test]
+    fn a_format_no_registered_account_serves_says_so() {
+        let catalog = Catalog::builtin();
+        let error = catalog
+            .route(Wire::Chat, "whatever", &["anthropic".to_owned()])
+            .unwrap_err();
+        assert!(matches!(error, Unroutable::NobodySpeaks { .. }));
+    }
+
+    #[test]
+    fn an_account_nobody_registered_never_wins_the_toss() {
+        let catalog = Catalog::builtin();
+        let route = catalog.route(Wire::Responses, "unknown", &["anthropic".to_owned()]);
+        assert!(
+            matches!(route, Err(Unroutable::Undeclared { .. })),
+            "with no openai account the only candidate is anthropic, by translation"
         );
     }
 

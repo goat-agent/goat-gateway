@@ -1,5 +1,6 @@
 pub mod api;
 pub mod auth;
+pub mod chat;
 pub mod limits;
 pub mod messages;
 pub mod oauth;
@@ -7,6 +8,7 @@ pub mod pool;
 pub mod pricing;
 pub mod provider;
 pub mod responses;
+pub mod serve;
 pub mod store;
 pub mod upstream;
 pub mod web;
@@ -69,6 +71,7 @@ impl App {
         let gateway = Router::new()
             .route("/v1/messages", post(messages::handle))
             .route("/v1/responses", post(responses::handle))
+            .route("/v1/chat/completions", post(chat::handle))
             .route_layer(axum::middleware::from_fn_with_state(
                 self.clone(),
                 auth::gateway,
