@@ -241,3 +241,134 @@ async fn the_screens_can_ask_for_a_window_and_a_grouping() {
         );
     }
 }
+
+const CHAT_SSE: &str = concat!(
+    "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"weighing\"}}]}\n\n",
+    "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Running it.\"}}]}\n\n",
+    "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_9\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"cmd\\\":\\\"ls\\\"}\"}}]}}]}\n\n",
+    "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+    "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":900,\"completion_tokens\":40,\"prompt_tokens_details\":{\"cached_tokens\":800}}}\n\n",
+    "data: [DONE]\n\n",
+);
+
+async fn coding_plan(State(seen): State<Seen>, headers: HeaderMap, body: Bytes) -> Response {
+    *seen.path.lock().unwrap() = Some("/coding/v1/chat/completions".to_owned());
+    *seen.body.lock().unwrap() = Some(body);
+    *seen.headers.lock().unwrap() = Some(headers);
+    Response::builder()
+        .status(200)
+        .header("content-type", "text/event-stream")
+        .body(Body::from(CHAT_SSE))
+        .unwrap()
+}
+
+async fn kimi_harness() -> Harness {
+    let seen = Seen::default();
+    let upstream = serve(
+        Router::new()
+            .route("/coding/v1/chat/completions", post(coding_plan))
+            .with_state(seen.clone()),
+    )
+    .await;
+
+    let store = Store::in_memory(&[7u8; 32]).unwrap();
+    store
+        .add_account("coding plan", "kimi", "api_key", b"key-kimi")
+        .unwrap();
+    let user = store.add_user("jmo").unwrap();
+    let key = store.issue_key(&user.id, "test").unwrap().secret;
+    store.set_admin_key("gwa_test-admin").unwrap();
+
+    let catalog = Catalog::builtin().with_base_url("kimi", &format!("http://{upstream}"));
+    let gateway = serve(App::new(store, [1u8; 32], catalog).router()).await;
+    Harness { gateway, seen, key }
+}
+
+fn claude_code_turn(stream: bool) -> Value {
+    json!({
+        "model": "kimi-for-coding",
+        "max_tokens": 4096,
+        "stream": stream,
+        "system": [{ "type": "text", "text": "You are Claude Code." }],
+        "tools": [{
+            "name": "bash",
+            "description": "run a command",
+            "input_schema": { "type": "object", "properties": { "cmd": { "type": "string" } } },
+        }],
+        "messages": [
+            { "role": "user", "content": "list the files" },
+            { "role": "assistant", "content": [
+                { "type": "thinking", "thinking": "earlier reasoning", "signature": "EqQBCgIYAh" },
+                { "type": "tool_use", "id": "toolu_01A", "name": "bash", "input": { "cmd": "pwd" } },
+            ]},
+            { "role": "user", "content": [
+                { "type": "tool_result", "tool_use_id": "toolu_01A", "content": "/home" },
+            ]},
+        ],
+    })
+}
+
+#[tokio::test]
+async fn claude_code_reaches_a_coding_plan_that_only_speaks_chat() {
+    let harness = kimi_harness().await;
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/v1/messages", harness.gateway))
+        .header("x-api-key", &harness.key)
+        .header("content-type", "application/json")
+        .json(&claude_code_turn(true))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["content-type"], "text/event-stream");
+
+    let sent: Value =
+        serde_json::from_slice(&harness.seen.body.lock().unwrap().clone().unwrap()).unwrap();
+    let roles: Vec<&str> = sent["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|message| message["role"].as_str().unwrap())
+        .collect();
+    assert_eq!(roles, ["system", "user", "assistant", "tool"]);
+    assert_eq!(sent["messages"][2]["tool_calls"][0]["id"], "toolu_01A");
+    assert_eq!(sent["messages"][3]["tool_call_id"], "toolu_01A");
+    assert_eq!(sent["tools"][0]["function"]["name"], "bash");
+    assert!(
+        !sent.to_string().contains("EqQBCgIYAh"),
+        "a signature this provider never minted must not be sent to it"
+    );
+
+    let body = response.text().await.unwrap();
+    assert!(body.contains("event: message_start"), "{body}");
+    assert!(body.contains("\"type\":\"thinking_delta\""), "{body}");
+    assert!(body.contains("\"type\":\"tool_use\""), "{body}");
+    assert!(body.contains("\"id\":\"call_9\""), "{body}");
+    assert!(body.contains("\"stop_reason\":\"tool_use\""), "{body}");
+    assert!(body.contains("event: message_stop"), "{body}");
+}
+
+#[tokio::test]
+async fn a_turn_that_did_not_ask_to_stream_still_gets_an_answer() {
+    let harness = kimi_harness().await;
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/v1/messages", harness.gateway))
+        .header("x-api-key", &harness.key)
+        .header("content-type", "application/json")
+        .json(&claude_code_turn(false))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    let whole: Value = response.json().await.unwrap();
+    assert_eq!(whole["role"], "assistant");
+    assert_eq!(whole["stop_reason"], "tool_use");
+    assert_eq!(whole["content"][0]["thinking"], "weighing");
+    assert_eq!(whole["content"][1]["text"], "Running it.");
+    assert_eq!(whole["content"][2]["input"]["cmd"], "ls");
+    assert_eq!(whole["usage"]["cache_read_input_tokens"], 800);
+}

@@ -141,6 +141,13 @@ fn bearer() -> Key {
 }
 
 pub fn translatable(from: Wire, to: Wire) -> bool {
+    matches!(
+        (from, to),
+        (Wire::Responses, Wire::Messages) | (Wire::Messages, Wire::Chat)
+    )
+}
+
+fn needs_thinking_declared(from: Wire, to: Wire) -> bool {
     matches!((from, to), (Wire::Responses, Wire::Messages))
 }
 
@@ -195,7 +202,9 @@ impl Provider {
                 wire: ingress,
             });
         };
-        if declared.as_ref().and_then(Model::target).is_none() {
+        if needs_thinking_declared(ingress, endpoint.wire)
+            && declared.as_ref().and_then(Model::target).is_none()
+        {
             return Err(Unroutable::Undeclared {
                 model: model.to_owned(),
                 wire: endpoint.wire,

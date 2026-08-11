@@ -5,6 +5,8 @@ use crate::{
     mapping::Mapping,
 };
 
+pub use crate::mapping::{TranslateError, Translated};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThinkingStyle {
     Adaptive,
@@ -25,24 +27,6 @@ pub struct Target {
     pub model: TargetModel,
     pub provenance: Provenance,
     pub stream_thinking: bool,
-}
-
-#[derive(Debug)]
-pub struct Translated {
-    pub body: Vec<u8>,
-    pub mapping: Mapping,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum TranslateError {
-    #[error("request is not valid JSON: {0}")]
-    Json(#[from] serde_json::Error),
-    #[error(
-        "{what} has no counterpart in the Anthropic Messages API; refusing to send a request that silently loses it"
-    )]
-    NoCounterpart { what: String },
-    #[error("{what} is malformed: {detail}")]
-    Malformed { what: String, detail: String },
 }
 
 pub fn translate(
@@ -227,6 +211,7 @@ fn convert_item(
                                 "a {role} message in the middle of the conversation ({})",
                                 at("")
                             ),
+                            wire: "Anthropic Messages",
                         });
                     }
                 }
@@ -294,6 +279,7 @@ fn convert_item(
                     let sealed = envelopes.open_for(blob, &target.provenance).map_err(|e| {
                         TranslateError::NoCounterpart {
                             what: format!("{} ({e})", at("/encrypted_content")),
+                            wire: "Anthropic Messages",
                         }
                     })?;
                     let block = match sealed.payload {
@@ -330,6 +316,7 @@ fn convert_item(
         other => {
             return Err(TranslateError::NoCounterpart {
                 what: format!("input item type {other:?} at {}", at("")),
+                wire: "Anthropic Messages",
             });
         }
     }
@@ -377,6 +364,7 @@ fn content_blocks(content: &Value, at: &str) -> Result<Vec<Value>, TranslateErro
             other => {
                 return Err(TranslateError::NoCounterpart {
                     what: format!("content part {other:?} at {at}"),
+                    wire: "Anthropic Messages",
                 });
             }
         }
@@ -450,6 +438,7 @@ fn convert_tools(tools: &Value, mapping: &mut Mapping) -> Result<Vec<Value>, Tra
             other => {
                 return Err(TranslateError::NoCounterpart {
                     what: format!("tool type {other:?} at /tools/{index}"),
+                    wire: "Anthropic Messages",
                 });
             }
         }
@@ -466,6 +455,7 @@ fn convert_tool_choice(choice: &Value) -> Result<Value, TranslateError> {
             other => {
                 return Err(TranslateError::NoCounterpart {
                     what: format!("tool_choice {other:?}"),
+                    wire: "Anthropic Messages",
                 });
             }
         },

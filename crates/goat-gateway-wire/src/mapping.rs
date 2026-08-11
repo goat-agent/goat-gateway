@@ -1,5 +1,23 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug)]
+pub struct Translated {
+    pub body: Vec<u8>,
+    pub mapping: Mapping,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum TranslateError {
+    #[error("request is not valid JSON: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error(
+        "{what} has no counterpart in the {wire} format; refusing to send a request that silently loses it"
+    )]
+    NoCounterpart { what: String, wire: &'static str },
+    #[error("{what} is malformed: {detail}")]
+    Malformed { what: String, detail: String },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Added {
     pub pointer: String,
