@@ -93,7 +93,6 @@ const CARRIED: &[&str] = &[
     "stream",
     "stop_sequences",
     "thinking",
-    "metadata",
 ];
 
 fn carry(

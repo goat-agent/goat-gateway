@@ -395,3 +395,43 @@ fn nothing_ever_invents_a_signature() {
         "a provider that mints no signature must not appear to have minted one"
     );
 }
+
+#[test]
+fn a_field_we_cannot_honour_is_named_even_when_we_recognise_it() {
+    let request = json!({
+        "model": "gpt-5",
+        "stream": true,
+        "input": "hi",
+        "store": true,
+        "previous_response_id": "resp_earlier",
+        "parallel_tool_calls": false,
+        "service_tier": "priority",
+    });
+
+    let out = responses_to_messages::translate(
+        &serde_json::to_vec(&request).unwrap(),
+        &anthropic_target(),
+        &envelopes(),
+    )
+    .unwrap();
+
+    let named: Vec<&str> = out
+        .mapping
+        .dropped
+        .iter()
+        .map(|note| note.pointer.as_str())
+        .collect();
+
+    for expected in [
+        "/store",
+        "/previous_response_id",
+        "/parallel_tool_calls",
+        "/service_tier",
+    ] {
+        assert!(
+            named.contains(&expected),
+            "{expected} cannot be honoured by the provider we are sending to, so it has to be said: {named:?}"
+        );
+    }
+    assert!(out.mapping.lost_anything());
+}

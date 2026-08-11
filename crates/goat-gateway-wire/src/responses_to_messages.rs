@@ -157,12 +157,6 @@ const CARRIED: &[&str] = &[
     "stream",
     "reasoning",
     "metadata",
-    "store",
-    "previous_response_id",
-    "include",
-    "parallel_tool_calls",
-    "service_tier",
-    "prompt_cache_key",
 ];
 
 #[derive(Default)]
