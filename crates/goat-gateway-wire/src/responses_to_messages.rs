@@ -137,11 +137,33 @@ pub fn translate(
         }
     }
 
+    mapping.mind_the_rest(&source, CARRIED, "Anthropic Messages");
+
     Ok(Translated {
         body: serde_json::to_vec(&Value::Object(out))?,
         mapping,
     })
 }
+
+const CARRIED: &[&str] = &[
+    "model",
+    "instructions",
+    "input",
+    "tools",
+    "tool_choice",
+    "max_output_tokens",
+    "temperature",
+    "top_p",
+    "stream",
+    "reasoning",
+    "metadata",
+    "store",
+    "previous_response_id",
+    "include",
+    "parallel_tool_calls",
+    "service_tier",
+    "prompt_cache_key",
+];
 
 #[derive(Default)]
 struct Builder {

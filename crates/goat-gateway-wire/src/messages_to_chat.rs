@@ -72,11 +72,29 @@ pub fn translate(input: &[u8], model: &str) -> Result<Translated, TranslateError
         );
     }
 
+    mapping.mind_the_rest(&source, CARRIED, WIRE);
+
     Ok(Translated {
         body: serde_json::to_vec(&Value::Object(out))?,
         mapping,
     })
 }
+
+const CARRIED: &[&str] = &[
+    "model",
+    "system",
+    "messages",
+    "tools",
+    "tool_choice",
+    "max_tokens",
+    "temperature",
+    "top_p",
+    "top_k",
+    "stream",
+    "stop_sequences",
+    "thinking",
+    "metadata",
+];
 
 fn carry(
     message: &Value,

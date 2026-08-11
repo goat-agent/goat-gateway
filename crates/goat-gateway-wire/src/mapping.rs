@@ -39,6 +39,21 @@ pub struct Mapping {
 }
 
 impl Mapping {
+    pub fn mind_the_rest(&mut self, source: &serde_json::Value, consumed: &[&str], wire: &str) {
+        let Some(fields) = source.as_object() else {
+            return;
+        };
+        for name in fields.keys() {
+            if consumed.contains(&name.as_str()) {
+                continue;
+            }
+            self.dropped(
+                format!("/{name}"),
+                format!("this gateway does not know what {name} means in the {wire} format"),
+            );
+        }
+    }
+
     pub fn moved(&mut self) {
         self.moved += 1;
     }
