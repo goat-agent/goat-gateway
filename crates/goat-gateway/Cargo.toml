@@ -37,6 +37,7 @@ mime_guess = { workspace = true }
 time = { workspace = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+async-stream = "0.3.6"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

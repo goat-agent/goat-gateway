@@ -1,6 +1,7 @@
 pub mod api;
 pub mod auth;
 pub mod chat;
+pub mod events;
 pub mod limits;
 pub mod messages;
 pub mod oauth;
@@ -36,6 +37,7 @@ pub(crate) struct Inner {
     pub(crate) envelopes: Envelopes,
     pub(crate) catalog: crate::provider::Catalog,
     pub(crate) sessions: oauth::Sessions,
+    pub(crate) announcer: events::Announcer,
 }
 
 impl App {
@@ -47,12 +49,17 @@ impl App {
                 envelopes: Envelopes::new(&envelope_key),
                 catalog,
                 sessions: oauth::Sessions::default(),
+                announcer: events::Announcer::default(),
             }),
         }
     }
 
     pub fn store(&self) -> &Store {
         &self.inner.store
+    }
+
+    pub fn announcer(&self) -> &events::Announcer {
+        &self.inner.announcer
     }
 
     pub fn catalog(&self) -> &crate::provider::Catalog {
@@ -77,10 +84,12 @@ impl App {
                 auth::gateway,
             ));
 
-        let admin = api::router().route_layer(axum::middleware::from_fn_with_state(
-            self.clone(),
-            auth::admin,
-        ));
+        let admin = api::router()
+            .route("/api/events", axum::routing::get(events::stream))
+            .route_layer(axum::middleware::from_fn_with_state(
+                self.clone(),
+                auth::admin,
+            ));
 
         Router::new()
             .merge(gateway)
@@ -91,8 +100,44 @@ impl App {
     }
 }
 
-pub(crate) fn relay(response: reqwest::Response) -> Response {
-    relay_metered(response, None)
+pub(crate) async fn relay_failure(response: reqwest::Response) -> (Response, Option<String>) {
+    let status =
+        StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let mut builder = Response::builder().status(status);
+    if let Some(headers) = builder.headers_mut() {
+        for (name, value) in response.headers() {
+            if name == "content-length" || name == "transfer-encoding" {
+                continue;
+            }
+            headers.append(name.clone(), value.clone());
+        }
+    }
+
+    let body = response.bytes().await.unwrap_or_default();
+    let said = complaint(&body);
+    let relayed = builder
+        .body(axum::body::Body::from(body))
+        .unwrap_or_else(|error| gateway_error(format!("could not relay response: {error}")));
+    (relayed, said)
+}
+
+fn complaint(body: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(body).ok()?.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let spoken = serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|parsed| {
+            parsed
+                .get("error")
+                .and_then(|error| error.get("message"))
+                .or_else(|| parsed.get("message"))
+                .and_then(|message| message.as_str())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| text.to_owned());
+    Some(spoken.chars().take(2000).collect())
 }
 
 pub(crate) fn relay_metered(response: reqwest::Response, settle: Option<Settle>) -> Response {
@@ -142,12 +187,21 @@ impl Settle {
             .map(|price| pricing::cost_micros(price, &self.row.usage));
         self.row.duration_ms = Some(store::now() - self.started);
 
-        if let Some(kind) = meter.failure() {
-            self.row.status = "error".into();
-            self.row.error_kind = Some(kind.to_owned());
+        match meter.failure() {
+            Some(kind) => {
+                self.row.status = "error".into();
+                self.row.error_kind = Some(kind.to_owned());
+            }
+            None => self.row.status = "ok".into(),
         }
 
         let _ = self.app.inner.store.record_request(&self.row);
+        self.app.announcer().say(events::Happening::RequestSettled {
+            id: self.row.id.clone(),
+            status: self.row.status.clone(),
+            duration_ms: self.row.duration_ms,
+            cost_micros: self.row.cost_micros,
+        });
     }
 }
 
@@ -229,21 +283,25 @@ pub(crate) fn observe(app: &App, account: &str, status: u16, headers: &axum::htt
     let snapshot = limits::parse(headers, store::now());
     if !snapshot.is_empty() {
         let _ = app.inner.store.set_rate_limits(account, &snapshot);
+        app.announcer().say(events::Happening::LimitsObserved {
+            account: account.to_owned(),
+        });
     }
 
-    match limits::classify(status, headers, &snapshot) {
+    let moved_to = match limits::classify(status, headers, &snapshot) {
         limits::Verdict::Exhausted { until } => {
-            let _ =
-                app.inner
-                    .store
-                    .set_state(account, store::AccountState::RateLimited, Some(until));
+            Some((store::AccountState::RateLimited, Some(until)))
         }
-        limits::Verdict::SignedOut => {
-            let _ = app
-                .inner
-                .store
-                .set_state(account, store::AccountState::SignInExpired, None);
-        }
-        limits::Verdict::Transient | limits::Verdict::Fine => {}
+        limits::Verdict::SignedOut => Some((store::AccountState::SignInExpired, None)),
+        limits::Verdict::Transient | limits::Verdict::Fine => None,
+    };
+
+    if let Some((state, until)) = moved_to {
+        let _ = app.inner.store.set_state(account, state, until);
+        app.announcer().say(events::Happening::AccountChanged {
+            account: account.to_owned(),
+            state,
+            until,
+        });
     }
 }

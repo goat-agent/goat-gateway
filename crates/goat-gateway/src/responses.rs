@@ -102,10 +102,6 @@ pub(crate) async fn translate(incoming: Incoming, ready: Ready) -> Response {
         upstream.headers(),
     );
 
-    if !upstream.status().is_success() {
-        return crate::relay(upstream);
-    }
-
     let mut row = serve::opened(&incoming, &ready, None);
     row.byte_identical = Some(false);
     row.evidence = Some(serde_json::json!({
@@ -118,7 +114,20 @@ pub(crate) async fn translate(incoming: Incoming, ready: Ready) -> Response {
         .get("request-id")
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
+
+    let status = upstream.status().as_u16();
+    if !(200..300).contains(&status) {
+        let (relayed, said) = crate::relay_failure(upstream).await;
+        row.status = "error".into();
+        row.error_kind = Some(format!("http_{status}"));
+        row.error_message = said;
+        row.duration_ms = Some(crate::store::now() - ready.started);
+        let _ = incoming.app.store().record_request(&row);
+        return relayed;
+    }
+
     let _ = incoming.app.store().record_request(&row);
+    serve::announce_open(&incoming.app, &row);
 
     tracing::info!(
         moved = translated.mapping.moved,

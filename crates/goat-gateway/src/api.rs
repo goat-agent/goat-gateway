@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{delete, get, post},
@@ -10,7 +10,13 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::{App, auth, pricing, store::AccountState};
+use crate::{
+    App, auth, pricing,
+    store::{
+        AccountState,
+        insight::{By, Filter},
+    },
+};
 
 async fn signin_providers() -> Response {
     let providers: Vec<_> = crate::oauth::FLOWS
@@ -152,6 +158,8 @@ pub fn router() -> Router<App> {
         .route("/api/accounts/{name}", delete(remove_account))
         .route("/api/accounts/{name}/state", post(set_state))
         .route("/api/requests", get(requests))
+        .route("/api/requests/{id}", get(one_request))
+        .route("/api/usage", get(usage))
         .route("/api/models", get(models))
         .route("/api/pricing", get(price_table))
         .route("/api/signin/providers", get(signin_providers))
@@ -162,46 +170,78 @@ pub fn router() -> Router<App> {
         )
 }
 
-async fn overview(State(app): State<App>) -> Response {
+#[derive(Deserialize)]
+struct Window {
+    window_ms: Option<i64>,
+}
+
+async fn overview(State(app): State<App>, Query(window): Query<Window>) -> Response {
     let store = app.store();
     let _ = store.clear_expired_cooldowns();
 
-    let (accounts, limits) = match (store.accounts(), store.all_rate_limits()) {
-        (Ok(accounts), Ok(limits)) => (accounts, limits),
-        _ => return failed("could not read the database"),
+    let window_ms = window.window_ms.unwrap_or(86_400_000).max(60_000);
+    let filter = Filter::since(window_ms);
+
+    let (accounts, limits, totals) = match (
+        store.accounts(),
+        store.all_rate_limits(),
+        store.totals(&filter),
+    ) {
+        (Ok(accounts), Ok(limits), Ok(totals)) => (accounts, limits, totals),
+        _ => return failed("could not read the database".to_owned()),
     };
 
+    let seen = |name: &str| limits.iter().find(|(account, ..)| account == name);
     let mut providers: Vec<serde_json::Value> = Vec::new();
+
     for provider in unique(accounts.iter().map(|account| account.provider.clone())) {
+        let declared = app.catalog().get(&provider);
         let mine: Vec<_> = accounts
             .iter()
             .filter(|account| account.provider == provider)
             .collect();
-        let usable = mine
-            .iter()
-            .filter(|account| account.state == AccountState::Active)
-            .count();
-        let soonest = mine
-            .iter()
-            .filter_map(|account| account.cooldown_until)
-            .min();
 
         providers.push(json!({
             "provider": provider,
+            "label": declared.map_or(provider.clone(), |declared| declared.label.clone()),
             "accounts": mine.len(),
-            "usable": usable,
-            "soonest_reset_ms": soonest,
+            "usable": mine.iter().filter(|a| a.state == AccountState::Active).count(),
+            "soonest_reset_ms": mine.iter().filter_map(|a| a.cooldown_until).min(),
+            "reports_limits": declared
+                .is_none_or(|declared| declared.limits != crate::provider::Limits::None),
             "limits": mine.iter().filter_map(|account| {
-                limits
-                    .iter()
-                    .find(|(name, _)| name == &account.name)
-                    .map(|(name, snapshot)| json!({ "account": name, "windows": snapshot.windows }))
+                seen(&account.name).map(|(name, snapshot, observed_at)| json!({
+                    "account": name,
+                    "windows": snapshot.windows,
+                    "observed_at": observed_at,
+                }))
             }).collect::<Vec<_>>(),
         }));
     }
 
+    let attention: Vec<_> = accounts
+        .iter()
+        .filter(|account| account.state != AccountState::Active)
+        .map(|account| {
+            json!({
+                "account": account.name,
+                "provider": account.provider,
+                "state": account.state,
+                "until": account.cooldown_until,
+            })
+        })
+        .collect();
+
     Json(json!({
+        "now": crate::store::now(),
+        "window_ms": window_ms,
+        "totals": totals,
+        "cache_hit_ratio": totals.cache_hit_ratio(),
+        "error_ratio": (totals.requests > 0)
+            .then(|| totals.errors as f64 / totals.requests as f64),
+        "requests_per_hour": totals.requests as f64 / (window_ms as f64 / 3_600_000.0),
         "providers": providers,
+        "attention": attention,
         "pricing_as_of": pricing::AS_OF,
     }))
     .into_response()
@@ -268,10 +308,76 @@ async fn set_state(
     }
 }
 
-async fn requests(State(app): State<App>) -> Response {
-    match app.store().recent_requests(200) {
-        Ok(requests) => Json(json!({ "requests": requests })).into_response(),
+#[derive(Deserialize)]
+struct Page {
+    #[serde(flatten)]
+    filter: Filter,
+    before: Option<i64>,
+    limit: Option<usize>,
+}
+
+async fn requests(State(app): State<App>, Query(page): Query<Page>) -> Response {
+    let limit = page.limit.unwrap_or(100).clamp(1, 500);
+    match app
+        .store()
+        .find_requests(&page.filter, page.before, limit + 1)
+    {
+        Ok(mut found) => {
+            let more = found.len() > limit;
+            found.truncate(limit);
+            let next = more
+                .then(|| found.last().map(|row| row.started_at))
+                .flatten();
+            Json(json!({ "requests": found, "next_before": next })).into_response()
+        }
         Err(error) => failed(error.to_string()),
+    }
+}
+
+async fn one_request(State(app): State<App>, Path(id): Path<String>) -> Response {
+    match app.store().request(&id) {
+        Ok(Some(row)) => Json(json!({ "request": row })).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("no request {id}") })),
+        )
+            .into_response(),
+        Err(error) => failed(error.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+struct UsageQuery {
+    #[serde(flatten)]
+    filter: Filter,
+    by: Option<By>,
+    bucket_ms: Option<i64>,
+}
+
+async fn usage(State(app): State<App>, Query(query): Query<UsageQuery>) -> Response {
+    let store = app.store();
+    let by = query.by.unwrap_or(By::Provider);
+    let bucket = query.bucket_ms.unwrap_or(3_600_000).max(60_000);
+    let filter = &query.filter;
+
+    match (
+        store.totals(filter),
+        store.breakdown(filter, by),
+        store.series(filter, by, bucket),
+    ) {
+        (Ok(totals), Ok(breakdown), Ok(series)) => Json(json!({
+            "totals": totals,
+            "cache_hit_ratio": totals.cache_hit_ratio(),
+            "by": by,
+            "bucket_ms": bucket,
+            "breakdown": breakdown,
+            "series": series.into_iter().map(|(at, slices)| json!({
+                "at": at,
+                "slices": slices,
+            })).collect::<Vec<_>>(),
+        }))
+        .into_response(),
+        _ => failed("could not read the request history".to_owned()),
     }
 }
 

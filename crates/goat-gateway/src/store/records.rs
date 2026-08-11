@@ -66,6 +66,7 @@ pub struct RequestRow {
     pub translated: bool,
     pub status: String,
     pub error_kind: Option<String>,
+    pub error_message: Option<String>,
     pub ttft_ms: Option<i64>,
     pub duration_ms: Option<i64>,
     pub usage: Usage,
@@ -173,20 +174,21 @@ impl Store {
         connection.execute(
             "INSERT INTO requests (
                  id, started_at, person, client, conversation, provider, account, model,
-                 ingress, egress, translated, status, error_kind,
+                 ingress, egress, translated, status, error_kind, error_message,
                  ttft_ms, duration_ms,
                  input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
                  cost_micros, input_digest, output_digest, byte_identical, evidence, upstream_request_id
              ) VALUES (
                  ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
-                 ?9, ?10, ?11, ?12, ?13,
-                 ?14, ?15,
-                 ?16, ?17, ?18, ?19, ?20,
-                 ?21, ?22, ?23, ?24, ?25, ?26
+                 ?9, ?10, ?11, ?12, ?13, ?14,
+                 ?15, ?16,
+                 ?17, ?18, ?19, ?20, ?21,
+                 ?22, ?23, ?24, ?25, ?26, ?27
              )
              ON CONFLICT(id) DO UPDATE SET
                  status = excluded.status,
                  error_kind = excluded.error_kind,
+                 error_message = excluded.error_message,
                  ttft_ms = excluded.ttft_ms,
                  duration_ms = excluded.duration_ms,
                  input_tokens = excluded.input_tokens,
@@ -211,6 +213,7 @@ impl Store {
                 row.translated as i64,
                 row.status,
                 row.error_kind,
+                row.error_message,
                 row.ttft_ms,
                 row.duration_ms,
                 row.usage.input_tokens,
@@ -245,51 +248,58 @@ impl Store {
 
     pub fn recent_requests(&self, limit: usize) -> Result<Vec<RequestRow>, StoreError> {
         let connection = self.connection.lock().expect("store mutex");
-        let mut statement = connection.prepare(
-            "SELECT id, started_at, person, client, conversation, provider, account, model,
-                    ingress, egress, translated, status, error_kind,
-                    ttft_ms, duration_ms,
-                    input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
-                    cost_micros, input_digest, output_digest, byte_identical, evidence, upstream_request_id
-             FROM requests ORDER BY started_at DESC LIMIT ?1",
-        )?;
+        let mut statement = connection.prepare(&format!(
+            "SELECT {REQUEST_COLUMNS} FROM requests ORDER BY started_at DESC LIMIT ?1"
+        ))?;
         let rows = statement
-            .query_map(params![limit as i64], |row| {
-                Ok(RequestRow {
-                    id: row.get(0)?,
-                    started_at: row.get(1)?,
-                    person: row.get(2)?,
-                    client: row.get(3)?,
-                    conversation: row.get(4)?,
-                    provider: row.get(5)?,
-                    account: row.get(6)?,
-                    model: row.get(7)?,
-                    ingress: row.get(8)?,
-                    egress: row.get(9)?,
-                    translated: row.get::<_, i64>(10)? != 0,
-                    status: row.get(11)?,
-                    error_kind: row.get(12)?,
-                    ttft_ms: row.get(13)?,
-                    duration_ms: row.get(14)?,
-                    usage: Usage {
-                        input_tokens: row.get(15)?,
-                        output_tokens: row.get(16)?,
-                        cache_read_tokens: row.get(17)?,
-                        cache_write_tokens: row.get(18)?,
-                        reasoning_tokens: row.get(19)?,
-                    },
-                    cost_micros: row.get(20)?,
-                    input_digest: row.get(21)?,
-                    output_digest: row.get(22)?,
-                    byte_identical: row.get::<_, Option<i64>>(23)?.map(|flag| flag != 0),
-                    evidence: row
-                        .get::<_, Option<String>>(24)?
-                        .and_then(|text| serde_json::from_str(&text).ok()),
-                    upstream_request_id: row.get(25)?,
-                })
-            })?
+            .query_map(params![limit as i64], read_request)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+}
+
+pub(crate) const REQUEST_COLUMNS: &str = "id, started_at, person, client, conversation, provider, \
+     account, model, ingress, egress, translated, status, error_kind, error_message, ttft_ms, duration_ms, \
+     input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, \
+     cost_micros, input_digest, output_digest, byte_identical, evidence, upstream_request_id";
+
+pub(crate) fn read_request(row: &rusqlite::Row<'_>) -> rusqlite::Result<RequestRow> {
+    {
+        {
+            Ok(RequestRow {
+                id: row.get(0)?,
+                started_at: row.get(1)?,
+                person: row.get(2)?,
+                client: row.get(3)?,
+                conversation: row.get(4)?,
+                provider: row.get(5)?,
+                account: row.get(6)?,
+                model: row.get(7)?,
+                ingress: row.get(8)?,
+                egress: row.get(9)?,
+                translated: row.get::<_, i64>(10)? != 0,
+                status: row.get(11)?,
+                error_kind: row.get(12)?,
+                error_message: row.get(13)?,
+                ttft_ms: row.get(14)?,
+                duration_ms: row.get(15)?,
+                usage: Usage {
+                    input_tokens: row.get(16)?,
+                    output_tokens: row.get(17)?,
+                    cache_read_tokens: row.get(18)?,
+                    cache_write_tokens: row.get(19)?,
+                    reasoning_tokens: row.get(20)?,
+                },
+                cost_micros: row.get(21)?,
+                input_digest: row.get(22)?,
+                output_digest: row.get(23)?,
+                byte_identical: row.get::<_, Option<i64>>(24)?.map(|flag| flag != 0),
+                evidence: row
+                    .get::<_, Option<String>>(25)?
+                    .and_then(|text| serde_json::from_str(&text).ok()),
+                upstream_request_id: row.get(26)?,
+            })
+        }
     }
 }
 
@@ -325,22 +335,27 @@ impl Store {
         Ok(json.and_then(|text| serde_json::from_str(&text).ok()))
     }
 
-    pub fn all_rate_limits(&self) -> Result<Vec<(String, crate::limits::Snapshot)>, StoreError> {
+    pub fn all_rate_limits(
+        &self,
+    ) -> Result<Vec<(String, crate::limits::Snapshot, i64)>, StoreError> {
         let connection = self.connection.lock().expect("store mutex");
-        let mut statement = connection.prepare("SELECT account, snapshot FROM rate_limits")?;
+        let mut statement =
+            connection.prepare("SELECT account, snapshot, updated_at FROM rate_limits")?;
         let rows = statement
             .query_map([], |row| {
-                let account: String = row.get(0)?;
-                let json: String = row.get(1)?;
-                Ok((account, json))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows
             .into_iter()
-            .filter_map(|(account, json)| {
+            .filter_map(|(account, json, seen)| {
                 serde_json::from_str(&json)
                     .ok()
-                    .map(|snapshot| (account, snapshot))
+                    .map(|snapshot| (account, snapshot, seen))
             })
             .collect())
     }
@@ -469,6 +484,7 @@ mod tests {
                     translated: true,
                     status: "ok".into(),
                     error_kind: None,
+                    error_message: None,
                     ttft_ms: Some(300),
                     duration_ms: Some(1100),
                     usage: Usage::default(),

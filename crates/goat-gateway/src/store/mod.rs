@@ -16,6 +16,7 @@ use rusqlite::{Connection, OptionalExtension as _, params};
 pub use crate::store::auth::{ADMIN_PREFIX, Caller, Issued, KeyRow, UserRow, mint};
 pub use crate::store::records::{AccountRow, AccountState, RequestRow, Usage};
 
+pub mod insight;
 mod records;
 
 #[derive(Debug, thiserror::Error)]

@@ -191,8 +191,9 @@ pub fn opened(incoming: &Incoming, ready: &Ready, record: Option<&Record>) -> Re
         ingress: incoming.wire.id().to_owned(),
         egress: ready.route.endpoint.wire.id().to_owned(),
         translated: ready.route.translates_from(incoming.wire),
-        status: "ok".into(),
+        status: "in_flight".into(),
         error_kind: None,
+        error_message: None,
         ttft_ms: None,
         duration_ms: None,
         usage: Usage::default(),
@@ -285,6 +286,10 @@ async fn pass(incoming: Incoming, ready: Ready) -> Response {
         }
     };
 
+    let mut row = opened(&incoming, &ready, Some(&record));
+    let _ = incoming.app.store().record_request(&row);
+    announce_open(&incoming.app, &row);
+
     let sent = incoming
         .app
         .inner
@@ -303,22 +308,24 @@ async fn pass(incoming: Incoming, ready: Ready) -> Response {
     let status = response.status().as_u16();
     crate::observe(&incoming.app, &ready.account, status, response.headers());
 
-    let mut row = opened(&incoming, &ready, Some(&record));
     row.ttft_ms = Some(now() - ready.started);
     row.upstream_request_id = response
         .headers()
         .get("request-id")
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
-    if !(200..300).contains(&status) {
-        row.status = "error".into();
-        row.error_kind = Some(format!("http_{status}"));
-    }
-    let _ = incoming.app.store().record_request(&row);
 
     if !(200..300).contains(&status) {
-        return crate::relay(response);
+        let (relayed, said) = crate::relay_failure(response).await;
+        row.status = "error".into();
+        row.error_kind = Some(format!("http_{status}"));
+        row.error_message = said;
+        row.duration_ms = Some(now() - ready.started);
+        let _ = incoming.app.store().record_request(&row);
+        return relayed;
     }
+
+    let _ = incoming.app.store().record_request(&row);
 
     let price = ready.route.price();
     crate::relay_metered(
@@ -330,6 +337,16 @@ async fn pass(incoming: Incoming, ready: Ready) -> Response {
             price,
         }),
     )
+}
+
+pub fn announce_open(app: &App, row: &RequestRow) {
+    app.announcer()
+        .say(crate::events::Happening::RequestOpened {
+            id: row.id.clone(),
+            provider: row.provider.clone(),
+            account: row.account.clone(),
+            model: row.model.clone(),
+        });
 }
 
 pub fn reject(wire: Wire, status: StatusCode, message: String) -> Response {
