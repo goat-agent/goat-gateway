@@ -208,3 +208,31 @@ async fn a_format_nobody_registered_serves_is_refused_before_anything_is_sent() 
     assert!(body.contains("Chat Completions"), "{body}");
     assert!(harness.reached().is_none());
 }
+
+#[tokio::test]
+async fn the_screens_can_ask_for_a_window_and_a_grouping() {
+    let harness = harness(&[("work", "openai")]).await;
+    harness
+        .post(
+            "/v1/responses",
+            json!({ "model": "gpt-5", "stream": true, "input": "hi" }),
+        )
+        .await;
+
+    let admin = reqwest::Client::new();
+    for path in [
+        "/api/usage?since=1700000000000&by=model&bucket_ms=3600000",
+        "/api/usage?by=account",
+        "/api/requests?limit=10&status=ok",
+        "/api/requests?search=gpt",
+        "/api/overview?window_ms=604800000",
+    ] {
+        let response = admin
+            .get(format!("http://{}{path}", harness.gateway))
+            .header("cookie", "goat_admin=gwa_test-admin")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200, "{path} answered {:?}", response.text().await);
+    }
+}

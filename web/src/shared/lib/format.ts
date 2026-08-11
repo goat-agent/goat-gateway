@@ -18,7 +18,12 @@ export function money(micros: number | null | undefined) {
   const dollars = micros / 1_000_000;
   if (dollars === 0) return "$0";
   if (dollars < 0.01) return "<$0.01";
-  if (dollars < 100) return `$${dollars.toFixed(2)}`;
+  if (dollars < 10_000) {
+    return `$${dollars.toLocaleString("en-US", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })}`;
+  }
   return `$${Math.round(dollars).toLocaleString("en-US")}`;
 }
 

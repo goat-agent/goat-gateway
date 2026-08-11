@@ -5,7 +5,7 @@ use crate::store::{RequestRow, Store, StoreError, Usage, now};
 
 pub const ABANDONED_AFTER_MS: i64 = 600_000;
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct Filter {
     pub since: Option<i64>,
     pub until: Option<i64>,
@@ -20,6 +20,22 @@ pub struct Filter {
 }
 
 impl Filter {
+    pub fn from_query(asked: &std::collections::HashMap<String, String>) -> Self {
+        let text = |name: &str| asked.get(name).map(String::from).filter(|v| !v.is_empty());
+        Self {
+            since: number(asked, "since"),
+            until: number(asked, "until"),
+            provider: text("provider"),
+            account: text("account"),
+            model: text("model"),
+            person: text("person"),
+            client: text("client"),
+            conversation: text("conversation"),
+            status: text("status"),
+            search: text("search"),
+        }
+    }
+
     pub fn since(window_ms: i64) -> Self {
         Self {
             since: Some(now() - window_ms),
@@ -113,6 +129,10 @@ pub struct Slice {
     pub totals: Totals,
 }
 
+pub fn number(asked: &std::collections::HashMap<String, String>, name: &str) -> Option<i64> {
+    asked.get(name)?.parse().ok()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum By {
@@ -125,6 +145,17 @@ pub enum By {
 }
 
 impl By {
+    pub fn named(text: Option<&String>) -> Self {
+        match text.map(String::as_str) {
+            Some("account") => Self::Account,
+            Some("model") => Self::Model,
+            Some("person") => Self::Person,
+            Some("client") => Self::Client,
+            Some("status") => Self::Status,
+            _ => Self::Provider,
+        }
+    }
+
     fn column(self) -> &'static str {
         match self {
             Self::Provider => "provider",

@@ -308,20 +308,16 @@ async fn set_state(
     }
 }
 
-#[derive(Deserialize)]
-struct Page {
-    #[serde(flatten)]
-    filter: Filter,
-    before: Option<i64>,
-    limit: Option<usize>,
-}
+type Asked = std::collections::HashMap<String, String>;
 
-async fn requests(State(app): State<App>, Query(page): Query<Page>) -> Response {
-    let limit = page.limit.unwrap_or(100).clamp(1, 500);
-    match app
-        .store()
-        .find_requests(&page.filter, page.before, limit + 1)
-    {
+async fn requests(State(app): State<App>, Query(asked): Query<Asked>) -> Response {
+    let filter = Filter::from_query(&asked);
+    let limit = crate::store::insight::number(&asked, "limit")
+        .unwrap_or(100)
+        .clamp(1, 500) as usize;
+    let before = crate::store::insight::number(&asked, "before");
+
+    match app.store().find_requests(&filter, before, limit + 1) {
         Ok(mut found) => {
             let more = found.len() > limit;
             found.truncate(limit);
@@ -346,19 +342,13 @@ async fn one_request(State(app): State<App>, Path(id): Path<String>) -> Response
     }
 }
 
-#[derive(Deserialize)]
-struct UsageQuery {
-    #[serde(flatten)]
-    filter: Filter,
-    by: Option<By>,
-    bucket_ms: Option<i64>,
-}
-
-async fn usage(State(app): State<App>, Query(query): Query<UsageQuery>) -> Response {
+async fn usage(State(app): State<App>, Query(asked): Query<Asked>) -> Response {
     let store = app.store();
-    let by = query.by.unwrap_or(By::Provider);
-    let bucket = query.bucket_ms.unwrap_or(3_600_000).max(60_000);
-    let filter = &query.filter;
+    let by = By::named(asked.get("by"));
+    let bucket = crate::store::insight::number(&asked, "bucket_ms")
+        .unwrap_or(3_600_000)
+        .max(60_000);
+    let filter = &Filter::from_query(&asked);
 
     match (
         store.totals(filter),

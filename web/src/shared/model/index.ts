@@ -1,0 +1,1 @@
+export { seriesColor } from "./series";
