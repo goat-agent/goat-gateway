@@ -18,6 +18,7 @@ const badge = cva(
   },
 );
 
+export type Tone = NonNullable<VariantProps<typeof badge>["tone"]>;
 export type BadgeProps = ComponentProps<"span"> & VariantProps<typeof badge>;
 
 export function Badge({ className, tone, ...props }: BadgeProps) {

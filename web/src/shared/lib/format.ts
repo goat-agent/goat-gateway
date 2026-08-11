@@ -1,47 +1,41 @@
-const UNKNOWN = "—";
+export const UNKNOWN = "—";
 
 export function count(value: number | null | undefined) {
-  if (value === null || value === undefined) return UNKNOWN;
-  return value.toLocaleString("en-US");
+  return value === null || value === undefined ? UNKNOWN : value.toLocaleString("en-US");
 }
 
 export function tokens(value: number | null | undefined) {
   if (value === null || value === undefined) return UNKNOWN;
   if (value < 1000) return String(value);
-  if (value < 1_000_000) return `${round(value / 1000)}k`;
-  if (value < 1_000_000_000) return `${round(value / 1_000_000)}M`;
-  return `${round(value / 1_000_000_000)}B`;
+  if (value < 1_000_000) return `${brief(value / 1000)}k`;
+  if (value < 1_000_000_000) return `${brief(value / 1_000_000)}M`;
+  return `${brief(value / 1_000_000_000)}B`;
 }
 
 export function money(micros: number | null | undefined) {
   if (micros === null || micros === undefined) return UNKNOWN;
   const dollars = micros / 1_000_000;
-  if (dollars === 0) return "$0";
+  if (dollars === 0) return "$0.00";
   if (dollars < 0.01) return "<$0.01";
-  if (dollars < 10_000) {
-    return `$${dollars.toLocaleString("en-US", {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    })}`;
-  }
-  return `$${Math.round(dollars).toLocaleString("en-US")}`;
+  return `$${dollars.toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
 }
 
 export function duration(ms: number | null | undefined) {
   if (ms === null || ms === undefined) return UNKNOWN;
   if (ms < 1000) return `${ms}ms`;
-  if (ms < 60_000) return `${round(ms / 1000)}s`;
+  if (ms < 60_000) return `${brief(ms / 1000)}s`;
   return `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`;
 }
 
 export function percent(ratio: number | null | undefined, digits = 1) {
-  if (ratio === null || ratio === undefined) return UNKNOWN;
-  return `${(ratio * 100).toFixed(digits)}%`;
+  return ratio === null || ratio === undefined ? UNKNOWN : `${(ratio * 100).toFixed(digits)}%`;
 }
 
-export function whole(ratio: number | null | undefined) {
-  if (ratio === null || ratio === undefined) return UNKNOWN;
-  return `${Math.round(ratio)}%`;
+export function share(used: number | null | undefined) {
+  return used === null || used === undefined ? UNKNOWN : `${Math.round(used)}%`;
 }
 
 export function clock(at: number | null | undefined) {
@@ -59,25 +53,34 @@ export function day(at: number | null | undefined) {
   return new Date(at).toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
+export function moment(at: number | null | undefined, now = Date.now()) {
+  if (!at) return UNKNOWN;
+  return sameDay(at, now) ? clock(at) : `${day(at)} ${clock(at)}`;
+}
+
 export function ago(at: number | null | undefined, now = Date.now()) {
   if (!at) return UNKNOWN;
-  const seconds = Math.max(0, Math.round((now - at) / 1000));
-  if (seconds < 60) return `${seconds}s ago`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-  if (seconds < 86_400) return `${Math.floor(seconds / 3600)}h ago`;
-  return `${Math.floor(seconds / 86_400)}d ago`;
+  return `${spanOf(Math.max(0, now - at))} ago`;
 }
 
-export function until(at: number | null | undefined, now = Date.now()) {
-  if (!at) return UNKNOWN;
-  const seconds = Math.max(0, Math.round((at - now) / 1000));
+export function within(at: number | null | undefined, now = Date.now()) {
+  return at ? spanOf(Math.max(0, at - now)) : UNKNOWN;
+}
+
+function spanOf(ms: number) {
+  const seconds = Math.round(ms / 1000);
   if (seconds < 60) return `${seconds}s`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
-  return `${Math.floor(seconds / 3600)}h ${Math.round((seconds % 3600) / 60)}m`;
+  if (seconds < 86_400) return `${Math.floor(seconds / 3600)}h`;
+  return `${Math.floor(seconds / 86_400)}d`;
 }
 
-function round(value: number) {
+function sameDay(left: number, right: number) {
+  const one = new Date(left);
+  const other = new Date(right);
+  return one.toDateString() === other.toDateString();
+}
+
+function brief(value: number) {
   return value < 10 ? value.toFixed(1) : String(Math.round(value));
 }
-
-export { UNKNOWN };

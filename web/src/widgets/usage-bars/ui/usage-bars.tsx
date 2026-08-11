@@ -1,5 +1,5 @@
 import type { Metric, Slice } from "@/entities/usage";
-import { seriesColor } from "@/shared/model";
+import { seriesColor } from "@/shared/model/series";
 
 export function UsageBars({
   slices,
@@ -19,8 +19,8 @@ export function UsageBars({
 
   if (rows.length === 0) {
     return (
-      <p className="px-3 py-8 text-center text-small text-ink-muted">
-        No {metric.label.toLowerCase()} to split up yet.
+      <p className="m-0 px-3 py-8 text-center text-small text-ink-muted">
+        Nothing here reports {metric.label.toLowerCase()}.
       </p>
     );
   }

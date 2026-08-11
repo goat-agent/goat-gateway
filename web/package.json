@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && node check-layers.mjs && vite build",
     "check": "tsc -b --noEmit && node check-layers.mjs"
   },
   "dependencies": {

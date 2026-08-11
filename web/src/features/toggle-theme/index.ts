@@ -1,2 +1,2 @@
-export { useSkin } from "./model/theme";
-export { ToggleTheme } from "./ui/toggle-theme";
+export { ThemeButton } from "./ui/theme-button";
+export { useTheme, type Theme } from "./model/store";

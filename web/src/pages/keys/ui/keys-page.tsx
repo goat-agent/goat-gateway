@@ -1,20 +1,8 @@
 import { useState } from "react";
-import { drop, send, useResource } from "@/shared/api";
-import { show } from "@/shared/lib";
-import {
-  Badge,
-  Body,
-  Button,
-  Head,
-  Input,
-  Nothing,
-  Page,
-  Panel,
-  PanelHead,
-  Row,
-  Table,
-} from "@/shared/ui";
+import { Badge, Body, Button, Head, Input, Nothing, Page, Panel, PanelHead, Row, Table } from "@/shared/ui";
+import { drop, tell, useResource } from "@/shared/api";
 import type { Key, User } from "@/entities/user";
+import { ago, day } from "@/shared/lib/format";
 import { IssueKey } from "@/features/issue-key";
 
 export function KeysPage() {
@@ -22,7 +10,7 @@ export function KeysPage() {
   const keys = useResource<{ keys: Key[] }>("/api/keys");
 
   const [issuing, setIssuing] = useState(false);
-  const [named, setNamed] = useState("");
+  const [adding, setAdding] = useState("");
 
   const people = users.data?.users ?? [];
   const live = (keys.data?.keys ?? []).filter((key) => key.revoked_at === null);
@@ -50,19 +38,19 @@ export function KeysPage() {
             className="flex gap-1.5"
             onSubmit={(event) => {
               event.preventDefault();
-              send("/api/users", { name: named.trim() }).then(() => {
-                setNamed("");
+              void tell("/api/users", { name: adding.trim() }).then(() => {
+                setAdding("");
                 users.reload();
               });
             }}
           >
             <Input
               className="h-7 w-40 text-micro"
-              value={named}
+              value={adding}
               placeholder="add a person"
-              onChange={(event) => setNamed(event.target.value)}
+              onChange={(event) => setAdding(event.target.value)}
             />
-            <Button size="small" type="submit" disabled={named.trim() === ""}>
+            <Button size="small" type="submit" disabled={adding.trim() === ""}>
               Add
             </Button>
           </form>
@@ -86,14 +74,14 @@ export function KeysPage() {
                   <td className="text-ink-secondary">
                     {live.filter((key) => key.user_id === person.id).length}
                   </td>
-                  <td className="text-ink-secondary">{show.day(person.created_at)}</td>
+                  <td className="text-ink-secondary">{day(person.created_at)}</td>
                   <td className="text-right">
                     <Button
                       tone="grave"
                       size="small"
                       onClick={() => {
                         if (!confirm(`Remove ${person.name}? Their keys stop working.`)) return;
-                        drop(`/api/users/${person.id}`).then(() => {
+                        void drop(`/api/users/${person.id}`).then(() => {
                           users.reload();
                           keys.reload();
                         });
@@ -129,11 +117,11 @@ export function KeysPage() {
                 <Row key={key.id}>
                   <td className="text-ink">{key.label}</td>
                   <td className="text-ink-secondary">
-                    {people.find((person) => person.id === key.user_id)?.name ?? show.UNKNOWN}
+                    {people.find((person) => person.id === key.user_id)?.name ?? "—"}
                   </td>
                   <td className="numeric text-ink-secondary">{key.prefix}…</td>
                   <td className="text-ink-secondary">
-                    {key.last_used_at ? show.ago(key.last_used_at) : <Badge>never</Badge>}
+                    {key.last_used_at ? ago(key.last_used_at) : <Badge>never</Badge>}
                   </td>
                   <td className="text-right">
                     <Button
@@ -141,7 +129,7 @@ export function KeysPage() {
                       size="small"
                       onClick={() => {
                         if (!confirm(`Revoke ${key.label}? Anything using it stops working.`)) return;
-                        drop(`/api/keys/${key.id}`).then(keys.reload);
+                        void drop(`/api/keys/${key.id}`).then(keys.reload);
                       }}
                     >
                       Revoke

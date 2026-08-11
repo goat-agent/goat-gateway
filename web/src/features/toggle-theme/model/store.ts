@@ -1,14 +1,14 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
-type Theme = "dark" | "light";
+export type Theme = "dark" | "light";
 
-type Skin = {
+type ThemeStore = {
   theme: Theme;
   flip: () => void;
 };
 
-export const useSkin = create<Skin>()(
+export const useTheme = create<ThemeStore>()(
   persist(
     (set) => ({
       theme: "dark",
@@ -17,3 +17,10 @@ export const useSkin = create<Skin>()(
     { name: "goat-gateway-theme" },
   ),
 );
+
+function wear(theme: Theme) {
+  document.documentElement.dataset["theme"] = theme;
+}
+
+useTheme.subscribe((store) => wear(store.theme));
+wear(useTheme.getState().theme);

@@ -1,15 +1,15 @@
-import { Route, Routes as Switch } from "react-router-dom";
+import { Route, Routes } from "react-router-dom";
+import { OverviewPage } from "@/pages/overview";
+import { UsagePage } from "@/pages/usage";
+import { RequestsPage } from "@/pages/requests";
+import { RequestPage } from "@/pages/request";
 import { AccountsPage } from "@/pages/accounts";
 import { KeysPage } from "@/pages/keys";
-import { OverviewPage } from "@/pages/overview";
-import { RequestPage } from "@/pages/request";
-import { RequestsPage } from "@/pages/requests";
 import { SettingsPage } from "@/pages/settings";
-import { UsagePage } from "@/pages/usage";
 
-export function Routes() {
+export function AppRoutes() {
   return (
-    <Switch>
+    <Routes>
       <Route path="/" element={<OverviewPage />} />
       <Route path="/usage" element={<UsagePage />} />
       <Route path="/requests" element={<RequestsPage />} />
@@ -17,6 +17,6 @@ export function Routes() {
       <Route path="/accounts" element={<AccountsPage />} />
       <Route path="/keys" element={<KeysPage />} />
       <Route path="/settings" element={<SettingsPage />} />
-    </Switch>
+    </Routes>
   );
 }

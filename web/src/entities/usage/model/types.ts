@@ -21,9 +21,15 @@ export type Slice = { key: string; totals: Totals };
 
 export type Bucket = { at: number; slices: Slice[] };
 
-export type Grouping = "provider" | "account" | "model" | "person" | "client" | "status";
+export const GROUPINGS = ["provider", "model", "account", "person", "client"] as const;
 
-export type Report = {
+export type Grouping = (typeof GROUPINGS)[number];
+
+export function groupingOf(value: string): Grouping {
+  return GROUPINGS.find((grouping) => grouping === value) ?? "provider";
+}
+
+export type UsageReport = {
   totals: Totals;
   cache_hit_ratio: number | null;
   by: Grouping;

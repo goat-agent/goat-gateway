@@ -1,4 +1,4 @@
-import type { Usage } from "@/entities/usage";
+import type { Usage } from "@/entities/usage/@x/request";
 
 export type Request = {
   id: string;
@@ -25,3 +25,5 @@ export type Request = {
   evidence: unknown;
   upstream_request_id: string | null;
 };
+
+export const STATUSES = ["ok", "error", "in_flight", "abandoned"] as const;

@@ -1,10 +1,8 @@
 import { useEffect, useRef } from "react";
 
-export type Happening =
-  | { happened: "request_opened"; id: string; provider: string; account: string | null; model: string }
-  | { happened: "request_settled"; id: string; status: string; duration_ms: number | null; cost_micros: number | null }
-  | { happened: "account_changed"; account: string; state: string; until: number | null }
-  | { happened: "limits_observed"; account: string };
+const KINDS = ["request_opened", "request_settled", "account_changed", "limits_observed"] as const;
+
+export type Happening = (typeof KINDS)[number];
 
 export function useHappenings(listen: (happening: Happening) => void) {
   const held = useRef(listen);
@@ -13,12 +11,24 @@ export function useHappenings(listen: (happening: Happening) => void) {
   useEffect(() => {
     const source = new EventSource("/api/events");
     source.onmessage = (message) => {
-      try {
-        held.current(JSON.parse(message.data) as Happening);
-      } catch {
-        // a frame we cannot read is not worth tearing the stream down for
-      }
+      const happening = read(message.data);
+      if (happening) held.current(happening);
     };
     return () => source.close();
   }, []);
+}
+
+function read(data: unknown): Happening | undefined {
+  if (typeof data !== "string") return undefined;
+  const body = parsed(data);
+  if (typeof body !== "object" || body === null || !("happened" in body)) return undefined;
+  return KINDS.find((kind) => kind === body.happened);
+}
+
+function parsed(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
 }

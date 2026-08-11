@@ -233,6 +233,11 @@ async fn the_screens_can_ask_for_a_window_and_a_grouping() {
             .send()
             .await
             .unwrap();
-        assert_eq!(response.status(), 200, "{path} answered {:?}", response.text().await);
+        assert_eq!(
+            response.status(),
+            200,
+            "{path} answered {:?}",
+            response.text().await
+        );
     }
 }

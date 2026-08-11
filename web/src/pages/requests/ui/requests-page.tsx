@@ -1,47 +1,73 @@
-import { useCallback } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useCallback, useState } from "react";
+import { Button, Input, Nothing, Page, Panel, PanelHead, Select } from "@/shared/ui";
 import { query, useHappenings, useResource } from "@/shared/api";
-import { Button, Nothing, Page, Panel, PanelHead } from "@/shared/ui";
-import type { Request } from "@/entities/request";
-import { FilterRequests } from "@/features/filter-requests";
-import { RequestList } from "@/widgets/request-list";
+import { STATUSES, type Request } from "@/entities/request";
+import { RequestTable } from "@/widgets/request-table";
+import { useFilter } from "@/features/filter-requests";
 
-type Found = { requests: Request[]; next_before: number | null };
+const FIELDS = ["search", "status", "provider", "account", "model", "person", "client"] as const;
 
 export function RequestsPage() {
-  const [params, setParams] = useSearchParams();
-  const asked = `/api/requests${query({
-    search: params.get("search"),
-    status: params.get("status"),
-    provider: params.get("provider"),
-    account: params.get("account"),
-    conversation: params.get("conversation"),
-    limit: 200,
-  })}`;
+  const { held, set, clear } = useFilter(FIELDS);
+  const [typed, setTyped] = useState(held["search"] ?? "");
 
-  const page = useResource<Found>(asked, [asked]);
+  const page = useResource<{ requests: Request[]; next_before: number | null }>(
+    `/api/requests${query({ ...held, limit: 100 })}`,
+  );
 
+  const reload = page.reload;
   useHappenings(
     useCallback(
       (happening) => {
-        if (happening.happened === "request_opened") page.reload();
+        if (happening === "request_opened" || happening === "request_settled") reload();
       },
-      [page],
+      [reload],
     ),
   );
 
-  const rows = page.data?.requests ?? [];
-  const narrowed = [...params.keys()].length > 0;
+  const requests = page.data?.requests ?? [];
+  const narrowed = Object.keys(held).length > 0;
 
   return (
     <Page
       title="Requests"
       note={page.error}
-      aside={<FilterRequests params={params} onChange={setParams} />}
+      aside={
+        <>
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              set("search", typed.trim());
+            }}
+          >
+            <Input
+              className="w-56"
+              placeholder="model, account, request id…"
+              value={typed}
+              onChange={(event) => setTyped(event.target.value)}
+            />
+          </form>
+          <Select
+            className="w-32"
+            value={held["status"] ?? ""}
+            onChange={(event) => set("status", event.target.value)}
+          >
+            <option value="">any status</option>
+            {STATUSES.map((status) => (
+              <option key={status} value={status}>
+                {status.replace("_", " ")}
+              </option>
+            ))}
+          </Select>
+        </>
+      }
     >
       <Panel>
-        <PanelHead title="Newest first" note={rows.length > 0 ? `${rows.length} shown` : undefined} />
-        {rows.length === 0 ? (
+        <PanelHead
+          title="Newest first"
+          note={requests.length > 0 ? `${requests.length} shown` : undefined}
+        />
+        {requests.length === 0 ? (
           <Nothing
             says={
               narrowed
@@ -50,12 +76,19 @@ export function RequestsPage() {
             }
             offers={
               narrowed ? (
-                <Button onClick={() => setParams(new URLSearchParams())}>Clear filters</Button>
+                <Button
+                  onClick={() => {
+                    setTyped("");
+                    clear();
+                  }}
+                >
+                  Clear filters
+                </Button>
               ) : undefined
             }
           />
         ) : (
-          <RequestList requests={rows} />
+          <RequestTable requests={requests} now={Date.now()} />
         )}
       </Panel>
     </Page>

@@ -1,8 +1,8 @@
-export { Badge } from "./badge";
-export { Button } from "./button";
-export { Dialog } from "./dialog";
+export { Button, type ButtonProps } from "./button";
 export { Field, Input, Select } from "./field";
-export { Nothing } from "./nothing";
-export { Fact, Facts, Page, Tile } from "./page";
 export { Panel, PanelHead } from "./panel";
-export { Body, Foot, Head, Numeric, NumericHead, Row, Table } from "./table";
+export { Badge, type Tone } from "./badge";
+export { Table, Head, Body, Foot, Row, Cell, Count } from "./table";
+export { Nothing } from "./nothing";
+export { Dialog } from "./dialog";
+export { Page, Tile, Fact, Facts } from "./page";

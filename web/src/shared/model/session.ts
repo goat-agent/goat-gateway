@@ -1,13 +1,13 @@
 import { create } from "zustand";
 
-type Lock = {
+type Session = {
   locked: boolean;
   lock: () => void;
-  open: () => void;
+  unlock: () => void;
 };
 
-export const useLock = create<Lock>((set) => ({
+export const useSession = create<Session>((set) => ({
   locked: false,
   lock: () => set({ locked: true }),
-  open: () => set({ locked: false }),
+  unlock: () => set({ locked: false }),
 }));

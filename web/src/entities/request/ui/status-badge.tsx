@@ -1,4 +1,11 @@
-import { Badge } from "@/shared/ui";
+import { Badge, type Tone } from "@/shared/ui";
+
+const TONES: Record<string, Tone> = {
+  ok: "good",
+  error: "critical",
+  abandoned: "serious",
+  in_flight: "warning",
+};
 
 export function StatusBadge({
   status,
@@ -11,17 +18,10 @@ export function StatusBadge({
 }) {
   return (
     <span className="flex items-center gap-1.5">
-      <Badge tone={tone(status)} title={kind ?? undefined}>
+      <Badge tone={TONES[status] ?? "neutral"} title={kind ?? undefined}>
         {status === "in_flight" ? "running" : status}
       </Badge>
       {translated ? <Badge title="the format was translated on the way through">↔</Badge> : null}
     </span>
   );
-}
-
-function tone(status: string) {
-  if (status === "error") return "critical" as const;
-  if (status === "abandoned") return "serious" as const;
-  if (status === "in_flight") return "warning" as const;
-  return "good" as const;
 }

@@ -1,18 +1,6 @@
+import { Body, Button, Cell, Count, Head, Nothing, Page, Panel, PanelHead, Row, Table } from "@/shared/ui";
 import { drop, useResource } from "@/shared/api";
-import { show } from "@/shared/lib";
-import {
-  Body,
-  Button,
-  Head,
-  Nothing,
-  Numeric,
-  NumericHead,
-  Page,
-  Panel,
-  PanelHead,
-  Row,
-  Table,
-} from "@/shared/ui";
+import { money } from "@/shared/lib/format";
 
 type Price = {
   provider: string;
@@ -25,9 +13,10 @@ type Price = {
 
 export function SettingsPage() {
   const models = useResource<Record<string, string[]>>("/api/models");
-  const prices = useResource<{ prices: Price[]; as_of: string }>("/api/pricing");
+  const pricing = useResource<{ prices: Price[]; as_of: string }>("/api/pricing");
 
   const providers = Object.entries(models.data ?? {});
+  const prices = pricing.data?.prices ?? [];
 
   return (
     <Page title="Settings">
@@ -44,11 +33,11 @@ export function SettingsPage() {
               </Row>
             </Head>
             <Body>
-              {providers.map(([provider, names]) => (
+              {providers.map(([provider, named]) => (
                 <Row key={provider}>
                   <td className="text-ink">{provider}</td>
                   <td className="whitespace-normal text-ink-secondary">
-                    {names.length > 0 ? names.join(", ") : "none — anything routes through untouched"}
+                    {named.length > 0 ? named.join(", ") : "none — anything routes through untouched"}
                   </td>
                 </Row>
               ))}
@@ -60,33 +49,33 @@ export function SettingsPage() {
       <Panel>
         <PanelHead
           title="Prices"
-          note={prices.data ? `as of ${prices.data.as_of}, per million tokens` : undefined}
+          note={pricing.data ? `as of ${pricing.data.as_of}, per million tokens` : undefined}
         />
-        {prices.data && prices.data.prices.length > 0 ? (
+        {prices.length === 0 ? (
+          <Nothing says="No model declares a price. Requests show no cost rather than a cost of zero." />
+        ) : (
           <Table>
             <Head>
               <Row>
                 <th>Model</th>
-                <NumericHead>Input</NumericHead>
-                <NumericHead>Output</NumericHead>
-                <NumericHead>Cache read</NumericHead>
-                <NumericHead>Cache write</NumericHead>
+                <Count>Input</Count>
+                <Count>Output</Count>
+                <Count>Cache read</Count>
+                <Count>Cache write</Count>
               </Row>
             </Head>
             <Body>
-              {prices.data.prices.map((price) => (
+              {prices.map((price) => (
                 <Row key={`${price.provider}-${price.model}`}>
                   <td className="text-ink">{price.model}</td>
-                  <Numeric>{show.money(price.input_per_mtok_micros)}</Numeric>
-                  <Numeric>{show.money(price.output_per_mtok_micros)}</Numeric>
-                  <Numeric>{show.money(price.cache_read_per_mtok_micros)}</Numeric>
-                  <Numeric>{show.money(price.cache_write_per_mtok_micros)}</Numeric>
+                  <Cell>{money(price.input_per_mtok_micros)}</Cell>
+                  <Cell>{money(price.output_per_mtok_micros)}</Cell>
+                  <Cell>{money(price.cache_read_per_mtok_micros)}</Cell>
+                  <Cell>{money(price.cache_write_per_mtok_micros)}</Cell>
                 </Row>
               ))}
             </Body>
           </Table>
-        ) : (
-          <Nothing says="No model declares a price. Requests will show no cost rather than a cost of zero." />
         )}
       </Panel>
 
@@ -96,7 +85,7 @@ export function SettingsPage() {
           <p className="m-0 text-small text-ink-secondary">
             Signing out clears the cookie in this browser. The admin key itself does not change.
           </p>
-          <Button onClick={() => drop("/api/session").finally(() => window.location.reload())}>
+          <Button onClick={() => void drop("/api/session").finally(() => window.location.reload())}>
             Sign out
           </Button>
         </div>

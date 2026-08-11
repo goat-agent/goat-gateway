@@ -8,37 +8,36 @@ export type Resource<T> = {
   reload: () => void;
 };
 
-export function useResource<T>(path: string | null, deps: unknown[] = []): Resource<T> {
+export function useResource<T>(path: string | undefined): Resource<T> {
   const [data, setData] = useState<T>();
   const [error, setError] = useState<string>();
-  const [loading, setLoading] = useState(path !== null);
+  const [loading, setLoading] = useState(path !== undefined);
   const [attempt, setAttempt] = useState(0);
 
   const reload = useCallback(() => setAttempt((count) => count + 1), []);
 
   useEffect(() => {
-    if (path === null) return;
-    let current = true;
+    if (path === undefined) return;
+    let listening = true;
     setLoading(true);
 
     ask<T>(path)
       .then((value) => {
-        if (!current) return;
+        if (!listening) return;
         setData(value);
         setError(undefined);
       })
       .catch((failure: Error) => {
-        if (current) setError(failure.message);
+        if (listening) setError(failure.message);
       })
       .finally(() => {
-        if (current) setLoading(false);
+        if (listening) setLoading(false);
       });
 
     return () => {
-      current = false;
+      listening = false;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, attempt, ...deps]);
+  }, [path, attempt]);
 
   return { data, error, loading, reload };
 }

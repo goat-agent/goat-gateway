@@ -47,26 +47,28 @@ export function Tile({
   );
 }
 
-export function Facts({ children }: { children: ReactNode }) {
-  return (
-    <dl className="m-0 grid grid-cols-2 gap-x-6 gap-y-0 p-3 sm:grid-cols-3">{children}</dl>
-  );
+function ink(tone: "good" | "warning" | "critical" | undefined) {
+  switch (tone) {
+    case "good":
+      return "var(--good)";
+    case "warning":
+      return "var(--warning)";
+    case "critical":
+      return "var(--critical)";
+    default:
+      return "var(--text)";
+  }
 }
 
-export function Fact({ name, value }: { name: string; value: string }) {
+export function Fact({ name, value }: { name: string; value: ReactNode }) {
   return (
     <div className="flex flex-col gap-0.5 border-b border-line-subtle py-2">
       <dt className="text-micro tracking-wide text-ink-muted uppercase">{name}</dt>
-      <dd className="numeric m-0 truncate text-ink" title={value}>
-        {value}
-      </dd>
+      <dd className="numeric m-0 truncate text-ink">{value}</dd>
     </div>
   );
 }
 
-function ink(tone?: "good" | "warning" | "critical") {
-  if (tone === "critical") return "var(--critical)";
-  if (tone === "warning") return "var(--warning)";
-  if (tone === "good") return "var(--good)";
-  return "var(--text)";
+export function Facts({ children }: { children: ReactNode }) {
+  return <dl className="m-0 grid grid-cols-2 gap-x-6 gap-y-0 p-3 sm:grid-cols-3">{children}</dl>;
 }

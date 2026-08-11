@@ -1,11 +1,11 @@
 import { Link } from "react-router-dom";
-import { drop, send } from "@/shared/api";
 import { Button } from "@/shared/ui";
+import { drop, tell } from "@/shared/api";
 import type { Account } from "@/entities/account";
 
 export function AccountActions({ account, onChanged }: { account: Account; onChanged: () => void }) {
-  const setState = (state: string) =>
-    send(`/api/accounts/${encodeURIComponent(account.name)}/state`, { state }).then(onChanged);
+  const move = (state: string) =>
+    void tell(`/api/accounts/${encodeURIComponent(account.name)}/state`, { state }).then(onChanged);
 
   return (
     <span className="flex justify-end gap-1">
@@ -14,27 +14,21 @@ export function AccountActions({ account, onChanged }: { account: Account; onCha
           Usage
         </Button>
       </Link>
-
-      {account.state === "sign_in_expired" ? (
-        <Button size="small" onClick={() => setState("active")}>
-          Try again
-        </Button>
-      ) : account.state === "disabled" ? (
-        <Button size="small" onClick={() => setState("active")}>
+      {account.state === "disabled" ? (
+        <Button size="small" onClick={() => move("active")}>
           Turn on
         </Button>
       ) : (
-        <Button tone="quiet" size="small" onClick={() => setState("disabled")}>
+        <Button tone="quiet" size="small" onClick={() => move("disabled")}>
           Turn off
         </Button>
       )}
-
       <Button
         tone="grave"
         size="small"
         onClick={() => {
           if (!confirm(`Remove ${account.name}? Its credential is deleted.`)) return;
-          drop(`/api/accounts/${encodeURIComponent(account.name)}`).then(onChanged);
+          void drop(`/api/accounts/${encodeURIComponent(account.name)}`).then(onChanged);
         }}
       >
         Remove

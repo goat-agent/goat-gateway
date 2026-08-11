@@ -4,7 +4,11 @@ import { cn } from "@/shared/lib/cn";
 export function Table({ className, ...props }: ComponentProps<"table">) {
   return (
     <div className="w-full overflow-x-auto">
-      <table data-slot="table" className={cn("w-full border-collapse text-small", className)} {...props} />
+      <table
+        data-slot="table"
+        className={cn("w-full border-collapse text-small", className)}
+        {...props}
+      />
     </div>
   );
 }
@@ -48,14 +52,14 @@ export function Foot({ className, ...props }: ComponentProps<"tfoot">) {
   );
 }
 
-export function Row({ className, ...props }: ComponentProps<"tr">) {
-  return <tr data-slot="table-row" className={cn(className)} {...props} />;
+export function Row(props: ComponentProps<"tr">) {
+  return <tr data-slot="table-row" {...props} />;
 }
 
-export function Numeric({ className, ...props }: ComponentProps<"td">) {
+export function Cell({ className, ...props }: ComponentProps<"td">) {
   return <td className={cn("numeric text-right", className)} {...props} />;
 }
 
-export function NumericHead({ className, ...props }: ComponentProps<"th">) {
+export function Count({ className, ...props }: ComponentProps<"th">) {
   return <th className={cn("!text-right", className)} {...props} />;
 }

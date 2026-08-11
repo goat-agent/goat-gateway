@@ -1,10 +1,10 @@
 import { useState } from "react";
-import { send } from "@/shared/api";
 import { Button, Field, Input } from "@/shared/ui";
-import { useLock } from "../model/lock";
+import { tell } from "@/shared/api";
+import { useSession } from "@/shared/model/session";
 
 export function Unlock() {
-  const open = useLock((held) => held.open);
+  const unlock = useSession((store) => store.unlock);
   const [key, setKey] = useState("");
   const [refused, setRefused] = useState<string>();
   const [trying, setTrying] = useState(false);
@@ -17,8 +17,8 @@ export function Unlock() {
           event.preventDefault();
           setTrying(true);
           setRefused(undefined);
-          send("/api/session", { key })
-            .then(open)
+          tell("/api/session", { key })
+            .then(unlock)
             .catch((error: Error) => setRefused(error.message))
             .finally(() => setTrying(false));
         }}

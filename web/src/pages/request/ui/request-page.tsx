@@ -1,8 +1,8 @@
 import { Link, useParams } from "react-router-dom";
-import { useResource } from "@/shared/api";
-import { show } from "@/shared/lib";
 import { Button, Fact, Facts, Nothing, Page, Panel, PanelHead } from "@/shared/ui";
+import { useResource } from "@/shared/api";
 import { StatusBadge, type Request } from "@/entities/request";
+import { duration, moment, money, tokens, UNKNOWN } from "@/shared/lib/format";
 
 export function RequestPage() {
   const { id = "" } = useParams();
@@ -33,20 +33,11 @@ export function RequestPage() {
       title={request.model}
       note={<span className="numeric">{request.id}</span>}
       aside={
-        <>
-          {request.conversation ? (
-            <Link to={`/requests?conversation=${encodeURIComponent(request.conversation)}`}>
-              <Button tone="quiet" size="small">
-                Whole conversation
-              </Button>
-            </Link>
-          ) : null}
-          <Link to="/requests">
-            <Button tone="quiet" size="small">
-              Back
-            </Button>
-          </Link>
-        </>
+        <Link to="/requests">
+          <Button tone="quiet" size="small">
+            Back
+          </Button>
+        </Link>
       }
     >
       <Panel>
@@ -58,18 +49,15 @@ export function RequestPage() {
           />
         </PanelHead>
         <Facts>
-          <Fact
-            name="Started"
-            value={`${show.day(request.started_at)} ${show.clock(request.started_at)}`}
-          />
-          <Fact name="Time to first byte" value={show.duration(request.ttft_ms)} />
-          <Fact name="Took" value={show.duration(request.duration_ms)} />
+          <Fact name="Started" value={moment(request.started_at)} />
+          <Fact name="Time to first byte" value={duration(request.ttft_ms)} />
+          <Fact name="Took" value={duration(request.duration_ms)} />
           <Fact name="Provider" value={request.provider} />
-          <Fact name="Account" value={request.account ?? show.UNKNOWN} />
-          <Fact name="Person" value={request.person ?? show.UNKNOWN} />
-          <Fact name="Client" value={request.client ?? show.UNKNOWN} />
+          <Fact name="Account" value={request.account ?? UNKNOWN} />
+          <Fact name="Person" value={request.person ?? UNKNOWN} />
+          <Fact name="Client" value={request.client ?? UNKNOWN} />
           <Fact name="Format in / out" value={`${request.ingress} → ${request.egress}`} />
-          <Fact name="Conversation" value={request.conversation ?? show.UNKNOWN} />
+          <Fact name="Conversation" value={request.conversation ?? UNKNOWN} />
         </Facts>
       </Panel>
 
@@ -85,12 +73,12 @@ export function RequestPage() {
       <Panel>
         <PanelHead title="What it used" />
         <Facts>
-          <Fact name="Input" value={show.tokens(request.usage.input_tokens)} />
-          <Fact name="Output" value={show.tokens(request.usage.output_tokens)} />
-          <Fact name="Read from cache" value={show.tokens(request.usage.cache_read_tokens)} />
-          <Fact name="Written to cache" value={show.tokens(request.usage.cache_write_tokens)} />
-          <Fact name="Thinking" value={show.tokens(request.usage.reasoning_tokens)} />
-          <Fact name="Cost" value={show.money(request.cost_micros)} />
+          <Fact name="Input" value={tokens(request.usage.input_tokens)} />
+          <Fact name="Output" value={tokens(request.usage.output_tokens)} />
+          <Fact name="Read from cache" value={tokens(request.usage.cache_read_tokens)} />
+          <Fact name="Written to cache" value={tokens(request.usage.cache_write_tokens)} />
+          <Fact name="Thinking" value={tokens(request.usage.reasoning_tokens)} />
+          <Fact name="Cost" value={money(request.cost_micros)} />
         </Facts>
       </Panel>
 
@@ -100,9 +88,9 @@ export function RequestPage() {
           note={request.byte_identical ? "nothing — the bytes went through untouched" : undefined}
         />
         <Facts>
-          <Fact name="Body in" value={request.input_digest ?? show.UNKNOWN} />
-          <Fact name="Body out" value={request.output_digest ?? show.UNKNOWN} />
-          <Fact name="Provider request id" value={request.upstream_request_id ?? show.UNKNOWN} />
+          <Fact name="Body in" value={request.input_digest ?? UNKNOWN} />
+          <Fact name="Body out" value={request.output_digest ?? UNKNOWN} />
+          <Fact name="Provider request id" value={request.upstream_request_id ?? UNKNOWN} />
         </Facts>
         {request.evidence ? (
           <pre className="m-0 overflow-x-auto border-t border-line-subtle p-3 font-mono text-code text-ink-secondary">

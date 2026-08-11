@@ -1,45 +1,35 @@
 import { useCallback, useState } from "react";
+import { Body, Button, Cell, Count, Head, Nothing, Page, Panel, PanelHead, Row, Table } from "@/shared/ui";
 import { useHappenings, useResource } from "@/shared/api";
-import { show } from "@/shared/lib";
-import {
-  Badge,
-  Body,
-  Button,
-  Head,
-  Nothing,
-  Page,
-  Panel,
-  PanelHead,
-  Row,
-  Table,
-} from "@/shared/ui";
-import { SAID, type Account } from "@/entities/account";
-import { useHealth, type Observed } from "@/entities/provider";
-import { AddAccount } from "@/features/add-account";
+import { StateBadge, type Account } from "@/entities/account";
+import { worstWindow, type Overview } from "@/entities/provider";
 import { AccountActions } from "@/features/set-account-state";
+import { RegisterAccount } from "@/widgets/register-account";
+import { ago, share, UNKNOWN } from "@/shared/lib/format";
 
 export function AccountsPage() {
   const [adding, setAdding] = useState(false);
   const accounts = useResource<{ accounts: Account[] }>("/api/accounts");
-  const health = useHealth();
+  const overview = useResource<Overview>("/api/overview");
 
-  const refresh = useCallback(() => {
-    accounts.reload();
-    health.reload();
-  }, [accounts, health]);
-
+  const reloadAccounts = accounts.reload;
+  const reloadOverview = overview.reload;
   useHappenings(
     useCallback(
       (happening) => {
-        if (happening.happened !== "request_opened") refresh();
+        if (happening === "account_changed" || happening === "limits_observed") {
+          reloadAccounts();
+          reloadOverview();
+        }
       },
-      [refresh],
+      [reloadAccounts, reloadOverview],
     ),
   );
 
   const rows = accounts.data?.accounts ?? [];
-  const now = health.data?.now ?? Date.now();
-  const observed = health.data?.providers.flatMap((provider) => provider.limits) ?? [];
+  const now = overview.data?.now ?? Date.now();
+  const limitsOf = (name: string) =>
+    overview.data?.providers.flatMap((provider) => provider.limits).find((limit) => limit.account === name);
 
   return (
     <Page
@@ -51,12 +41,12 @@ export function AccountsPage() {
         </Button>
       }
     >
-      <AddAccount
+      <RegisterAccount
         open={adding}
         onClose={() => setAdding(false)}
         onAdded={() => {
           setAdding(false);
-          refresh();
+          reloadAccounts();
         }}
       />
 
@@ -79,14 +69,15 @@ export function AccountsPage() {
                 <th>Provider</th>
                 <th>Credential</th>
                 <th>State</th>
-                <th>Fullest window</th>
-                <th>Observed</th>
+                <th>Tightest window</th>
+                <Count>Observed</Count>
                 <th />
               </Row>
             </Head>
             <Body>
               {rows.map((account) => {
-                const seen = observed.find((entry) => entry.account === account.name);
+                const limits = limitsOf(account.name);
+                const worst = limits ? worstWindow(limits.windows) : undefined;
                 return (
                   <Row key={account.name} className="hover:bg-raised">
                     <td className="text-ink">{account.name}</td>
@@ -95,17 +86,21 @@ export function AccountsPage() {
                       {account.credential_kind === "api_key" ? "API key" : "sign-in"}
                     </td>
                     <td>
-                      <Badge tone={SAID[account.state].tone}>
-                        {SAID[account.state].text}
-                        {account.state === "rate_limited" && account.cooldown_until
-                          ? ` · ${show.until(account.cooldown_until, now)}`
-                          : ""}
-                      </Badge>
+                      <StateBadge state={account.state} until={account.cooldown_until} now={now} />
                     </td>
-                    <td className="numeric text-ink-secondary">{fullest(seen)}</td>
-                    <td className="numeric text-ink-muted">{show.ago(seen?.observed_at, now)}</td>
+                    <td className="text-ink-secondary">
+                      {worst ? (
+                        <span className="numeric">
+                          {share(worst.used_percent)} of {worst.label}
+                          <span className="text-ink-muted"> · {worst.scope ?? "every model"}</span>
+                        </span>
+                      ) : (
+                        UNKNOWN
+                      )}
+                    </td>
+                    <Cell className="text-ink-muted">{ago(limits?.observed_at, now)}</Cell>
                     <td className="text-right">
-                      <AccountActions account={account} onChanged={refresh} />
+                      <AccountActions account={account} onChanged={reloadAccounts} />
                     </td>
                   </Row>
                 );
@@ -116,13 +111,4 @@ export function AccountsPage() {
       </Panel>
     </Page>
   );
-}
-
-function fullest(seen: Observed | undefined) {
-  const worst = seen?.windows.reduce(
-    (held, window) => (held && held.used_percent >= window.used_percent ? held : window),
-    seen.windows[0],
-  );
-  if (!worst) return show.UNKNOWN;
-  return `${show.whole(worst.used_percent)} of ${worst.label}${worst.scope ? ` · ${worst.scope}` : ""}`;
 }

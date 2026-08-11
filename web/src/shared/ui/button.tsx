@@ -7,12 +7,9 @@ const button = cva(
   {
     variants: {
       tone: {
-        primary:
-          "border-transparent bg-ink text-base hover:opacity-90",
-        plain:
-          "border-line bg-raised text-ink hover:bg-overlay",
-        quiet:
-          "border-transparent bg-transparent text-ink-secondary hover:bg-raised hover:text-ink",
+        primary: "border-transparent bg-ink text-base hover:opacity-90",
+        plain: "border-line bg-raised text-ink hover:bg-overlay",
+        quiet: "border-transparent bg-transparent text-ink-secondary hover:bg-raised hover:text-ink",
         grave:
           "border-transparent bg-transparent text-[var(--critical)] hover:bg-[color-mix(in_srgb,var(--critical)_14%,transparent)]",
       },

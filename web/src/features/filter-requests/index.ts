@@ -1,1 +1,2 @@
-export { FilterRequests } from "./ui/filter-requests";
+export { useFilter } from "./model/use-filter";
+export { FilterChips } from "./ui/filter-chips";

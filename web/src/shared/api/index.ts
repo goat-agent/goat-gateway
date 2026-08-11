@@ -1,3 +1,3 @@
-export { ask, drop, query, send, whenLocked } from "./client";
-export { useHappenings, type Happening } from "./happenings";
+export { ask, send, tell, drop, query, Refused } from "./client";
 export { useResource, type Resource } from "./use-resource";
+export { useHappenings, type Happening } from "./happenings";

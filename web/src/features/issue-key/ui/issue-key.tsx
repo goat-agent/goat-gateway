@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { send } from "@/shared/api";
 import { Button, Dialog, Field, Input, Select } from "@/shared/ui";
+import { send } from "@/shared/api";
 import type { User } from "@/entities/user";
 
 export function IssueKey({
@@ -14,9 +14,9 @@ export function IssueKey({
   onClose: () => void;
   onIssued: () => void;
 }) {
-  const [owner, setOwner] = useState("");
-  const [label, setLabel] = useState("");
   const [minted, setMinted] = useState<string>();
+  const [label, setLabel] = useState("");
+  const [owner, setOwner] = useState(people[0]?.id ?? "");
 
   const close = () => {
     setMinted(undefined);
@@ -43,7 +43,7 @@ export function IssueKey({
           className="flex flex-col gap-3"
           onSubmit={(event) => {
             event.preventDefault();
-            send<{ key: string }>("/api/keys", {
+            void send<{ key: string }>("/api/keys", {
               user_id: owner || people[0]?.id,
               label: label.trim(),
             }).then((issued) => {
