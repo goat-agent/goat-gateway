@@ -120,12 +120,17 @@ pub async fn admit(incoming: &Incoming, pinned: Option<&str>) -> Result<Ready, R
     .await
     .map_err(|error| reject(*wire, StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?;
 
+    let auth = match prepared.auth {
+        Auth::ApiKey(secret) => Auth::presented(route.key, secret),
+        carried => carried,
+    };
+
     Ok(Ready {
         started,
         request,
         route,
         account: chosen.name,
-        auth: prepared.auth,
+        auth,
         base_url: prepared.base_url.map(str::to_owned),
         conversation,
     })

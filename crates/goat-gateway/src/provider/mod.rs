@@ -100,6 +100,13 @@ impl Model {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Key {
+    Bearer,
+    XApiKey,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Limits {
@@ -119,12 +126,18 @@ pub struct Provider {
     pub headers: BTreeMap<String, String>,
     #[serde(default = "no_limits")]
     pub limits: Limits,
+    #[serde(default = "bearer")]
+    pub key: Key,
     #[serde(default)]
     pub models: Vec<Model>,
 }
 
 fn no_limits() -> Limits {
     Limits::None
+}
+
+fn bearer() -> Key {
+    Key::Bearer
 }
 
 pub fn translatable(from: Wire, to: Wire) -> bool {
@@ -164,6 +177,7 @@ impl Provider {
         let carry = |endpoint: &Endpoint| Route {
             provider: self.id.clone(),
             headers: self.headers.clone(),
+            key: self.key,
             endpoint: endpoint.clone(),
             model: declared.clone(),
         };
@@ -321,6 +335,7 @@ impl Catalog {
 pub struct Route {
     pub provider: String,
     pub headers: BTreeMap<String, String>,
+    pub key: Key,
     pub endpoint: Endpoint,
     pub model: Option<Model>,
 }
@@ -431,6 +446,64 @@ mod tests {
 
     fn both() -> Vec<String> {
         vec!["anthropic".to_owned(), "openai".to_owned()]
+    }
+
+    #[test]
+    fn a_provider_takes_its_key_the_way_it_asks_for_it() {
+        let catalog = Catalog::builtin();
+        assert_eq!(catalog.get("anthropic").unwrap().key, Key::XApiKey);
+        assert_eq!(catalog.get("openai").unwrap().key, Key::Bearer);
+        assert_eq!(catalog.get("zai").unwrap().key, Key::Bearer);
+    }
+
+    #[test]
+    fn a_coding_plan_is_its_own_provider_because_it_is_its_own_host() {
+        let catalog = Catalog::builtin();
+        let kimi = catalog.get("kimi").unwrap();
+        let moonshot = catalog.get("moonshot").unwrap();
+        assert_ne!(
+            kimi.endpoint(Wire::Chat).unwrap().url,
+            moonshot.endpoint(Wire::Chat).unwrap().url,
+            "a coding-plan key sent to the pay-per-token host fails quietly"
+        );
+    }
+
+    #[test]
+    fn an_override_replaces_one_provider_and_leaves_the_rest() {
+        let catalog = Catalog::with_overlay(
+            r#"
+            [provider.anthropic]
+            label = "Anthropic through a proxy"
+            key = "x_api_key"
+            endpoints = [{ wire = "messages", url = "http://10.0.0.2/v1/messages" }]
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            catalog
+                .get("anthropic")
+                .unwrap()
+                .endpoint(Wire::Messages)
+                .unwrap()
+                .url,
+            "http://10.0.0.2/v1/messages"
+        );
+        assert!(catalog.get("openai").is_some());
+    }
+
+    #[test]
+    fn a_typo_in_an_override_is_refused_rather_than_half_applied() {
+        let error = Catalog::with_overlay(
+            r#"
+            [provider.anthropic]
+            label = "mine"
+            endpoint = [{ wire = "messages", url = "http://10.0.0.2/v1/messages" }]
+            "#,
+        )
+        .unwrap_err();
+        assert!(matches!(error, CatalogError::Parse { .. }));
+        assert!(error.to_string().contains("config.toml"));
     }
 
     #[test]

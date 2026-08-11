@@ -47,6 +47,13 @@ impl std::fmt::Debug for Auth {
 }
 
 impl Auth {
+    pub fn presented(style: crate::provider::Key, secret: String) -> Self {
+        match style {
+            crate::provider::Key::Bearer => Self::Bearer(secret),
+            crate::provider::Key::XApiKey => Self::ApiKey(secret),
+        }
+    }
+
     fn header(&self) -> (HeaderName, HeaderValue, HeaderEdit) {
         match self {
             Self::ApiKey(key) => (

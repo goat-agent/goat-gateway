@@ -1,5 +1,6 @@
 [provider.anthropic]
 label = "Anthropic"
+key = "x_api_key"
 limits = "headers"
 endpoints = [{ wire = "messages", url = "https://api.anthropic.com/v1/messages" }]
 headers = { "anthropic-version" = "2023-06-01" }
@@ -59,3 +60,37 @@ name = "gpt-5"
 
 [[provider.openai.models]]
 name = "gpt-5-codex"
+
+[provider.zai]
+label = "Z.ai GLM Coding Plan"
+limits = { endpoint = { url = "https://api.z.ai/api/monitor/usage/quota/limit" } }
+endpoints = [{ wire = "messages", url = "https://api.z.ai/api/anthropic/v1/messages" }]
+headers = { "anthropic-version" = "2023-06-01" }
+
+[[provider.zai.models]]
+name = "glm-4.7"
+
+[[provider.zai.models]]
+name = "glm-4.6"
+
+[[provider.zai.models]]
+name = "glm-4.5-air"
+
+[provider.kimi]
+label = "Kimi Coding Plan"
+limits = { endpoint = { url = "https://api.kimi.com/coding/v1/usages" } }
+endpoints = [{ wire = "chat", url = "https://api.kimi.com/coding/v1/chat/completions" }]
+
+[[provider.kimi.models]]
+name = "kimi-for-coding"
+
+[provider.moonshot]
+label = "Moonshot"
+endpoints = [
+  { wire = "messages", url = "https://api.moonshot.ai/anthropic/v1/messages" },
+  { wire = "chat", url = "https://api.moonshot.ai/v1/chat/completions" },
+]
+headers = { "anthropic-version" = "2023-06-01" }
+
+[[provider.moonshot.models]]
+name = "kimi-k2.7-code"

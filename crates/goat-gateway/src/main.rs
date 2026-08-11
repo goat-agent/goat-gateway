@@ -1,7 +1,7 @@
 use std::net::{IpAddr, SocketAddr};
 
 use goat_gateway::{
-    App, catalog_from_env, envelope_key_from,
+    App, envelope_key_from, load_catalog,
     store::{ADMIN_PREFIX, Store, data_dir, load_or_create_master_key, mint},
 };
 
@@ -61,7 +61,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("registered the account from ANTHROPIC_API_KEY");
     }
 
-    let app = App::new(store, envelope_key_from(&master_key), catalog_from_env());
+    let app = App::new(store, envelope_key_from(&master_key), load_catalog(&dir)?);
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
     tracing::info!(%addr, data = %dir.display(), "listening");

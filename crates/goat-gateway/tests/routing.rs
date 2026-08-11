@@ -134,7 +134,7 @@ async fn an_openai_account_actually_receives_requests() {
 
     assert_eq!(status, 200, "{body}");
     assert_eq!(harness.reached().as_deref(), Some("/v1/responses"));
-    assert_eq!(harness.credential().as_deref(), Some("key-work"));
+    assert_eq!(harness.credential().as_deref(), Some("Bearer key-work"));
 }
 
 #[tokio::test]
@@ -174,7 +174,11 @@ async fn a_model_picks_its_own_provider_when_several_are_registered() {
             json!({ "model": "claude-sonnet-5", "max_tokens": 8 }),
         )
         .await;
-    assert_eq!(harness.credential().as_deref(), Some("key-personal"));
+    assert_eq!(
+        harness.credential().as_deref(),
+        Some("key-personal"),
+        "anthropic takes its key in x-api-key"
+    );
 
     harness
         .post(
@@ -182,7 +186,11 @@ async fn a_model_picks_its_own_provider_when_several_are_registered() {
             json!({ "model": "gpt-5", "stream": true, "input": "hi" }),
         )
         .await;
-    assert_eq!(harness.credential().as_deref(), Some("key-work"));
+    assert_eq!(
+        harness.credential().as_deref(),
+        Some("Bearer key-work"),
+        "openai takes the same kind of key as a bearer token"
+    );
 }
 
 #[tokio::test]

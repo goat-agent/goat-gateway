@@ -194,12 +194,20 @@ pub(crate) fn anthropic_error(status: StatusCode, kind: &str, message: String) -
     (status, axum::Json(body)).into_response()
 }
 
-pub fn catalog_from_env() -> crate::provider::Catalog {
-    let catalog = crate::provider::Catalog::builtin();
-    match std::env::var("GOAT_ANTHROPIC_BASE_URL") {
+pub fn load_catalog(dir: &std::path::Path) -> Result<provider::Catalog, provider::CatalogError> {
+    let path = dir.join("config.toml");
+    let catalog = match std::fs::read_to_string(&path) {
+        Ok(overlay) => {
+            let catalog = provider::Catalog::with_overlay(&overlay)?;
+            tracing::info!(path = %path.display(), "loaded provider overrides");
+            catalog
+        }
+        Err(_) => provider::Catalog::builtin(),
+    };
+    Ok(match std::env::var("GOAT_ANTHROPIC_BASE_URL") {
         Ok(base) if !base.is_empty() => catalog.with_base_url("anthropic", &base),
         _ => catalog,
-    }
+    })
 }
 
 pub fn envelope_key_from(master_key: &[u8; 32]) -> [u8; 32] {
