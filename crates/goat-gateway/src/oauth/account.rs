@@ -46,9 +46,7 @@ pub enum PrepareError {
     UnknownProvider { account: String, provider: String },
     #[error("{account:?} holds a damaged sign-in and must be signed in again")]
     Damaged { account: String },
-    #[error(
-        "{account:?} could not renew its sign-in and must be signed in again: {source}"
-    )]
+    #[error("{account:?} could not renew its sign-in and must be signed in again: {source}")]
     Expired {
         account: String,
         #[source]
@@ -115,12 +113,14 @@ async fn renew_if_stale(
         return Ok(stored);
     };
 
-    let tokens = client.refresh(declared, &refresh).await.map_err(|source| {
-        PrepareError::Expired {
-            account: account.to_owned(),
-            source,
-        }
-    })?;
+    let tokens =
+        client
+            .refresh(declared, &refresh)
+            .await
+            .map_err(|source| PrepareError::Expired {
+                account: account.to_owned(),
+                source,
+            })?;
 
     let mut renewed = Stored::from_tokens(&tokens);
     if renewed.account_id.is_none() {

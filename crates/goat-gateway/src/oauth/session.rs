@@ -98,12 +98,7 @@ impl Sessions {
     }
 
     fn settle(&self, session: &str, status: Status) {
-        if let Some(open) = self
-            .live
-            .lock()
-            .expect("sessions mutex")
-            .get_mut(session)
-        {
+        if let Some(open) = self.live.lock().expect("sessions mutex").get_mut(session) {
             open.status = status;
         }
     }
@@ -121,7 +116,8 @@ pub async fn begin(
     if account.is_empty() {
         return Err(SignInError::Unnamed);
     }
-    let declared = flow(provider).ok_or_else(|| SignInError::UnknownProvider(provider.to_owned()))?;
+    let declared =
+        flow(provider).ok_or_else(|| SignInError::UnknownProvider(provider.to_owned()))?;
     if !declared.supports(mode) {
         return Err(SignInError::Unsupported {
             provider: provider.to_owned(),
@@ -303,7 +299,13 @@ async fn redeem(
 
     let declared = flow(open.provider).ok_or(SignInError::Unknown)?;
     let tokens = client
-        .exchange(declared, &code, &open.state, &open.verifier, &open.redirect_uri)
+        .exchange(
+            declared,
+            &code,
+            &open.state,
+            &open.verifier,
+            &open.redirect_uri,
+        )
         .await?;
     save(store, &open.account, declared.provider, &tokens)
 }
@@ -314,7 +316,12 @@ fn save(
     provider: &str,
     tokens: &crate::oauth::Tokens,
 ) -> Result<(), SignInError> {
-    store.add_account(account, provider, KIND, &Stored::from_tokens(tokens).to_bytes())?;
+    store.add_account(
+        account,
+        provider,
+        KIND,
+        &Stored::from_tokens(tokens).to_bytes(),
+    )?;
     Ok(())
 }
 
@@ -406,16 +413,9 @@ mod tests {
     #[tokio::test]
     async fn a_pasted_code_is_refused_on_a_session_that_is_waiting_for_the_browser() {
         let (store, client, sessions) = parts();
-        let started = begin(
-            &store,
-            &client,
-            &sessions,
-            "anthropic",
-            "a",
-            Mode::Loopback,
-        )
-        .await
-        .unwrap();
+        let started = begin(&store, &client, &sessions, "anthropic", "a", Mode::Loopback)
+            .await
+            .unwrap();
 
         let error = finish_paste(&store, &client, &sessions, &started.session, "ac#st")
             .await
@@ -513,12 +513,7 @@ mod tests {
             .await
             .unwrap();
 
-        if let Some(open) = sessions
-            .live
-            .lock()
-            .unwrap()
-            .get_mut(&stale.session)
-        {
+        if let Some(open) = sessions.live.lock().unwrap().get_mut(&stale.session) {
             open.opened_at = now() - ABANDONED_AFTER_MS - 1;
         }
 

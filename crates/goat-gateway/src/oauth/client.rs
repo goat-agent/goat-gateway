@@ -131,12 +131,15 @@ impl Client {
         redirect_uri: &str,
     ) -> Result<Tokens, OauthError> {
         let fields = exchange_fields(flow, code, state, verifier, redirect_uri);
-        self.token_call(flow, &self.at(flow.token_url), fields).await
+        self.token_call(flow, &self.at(flow.token_url), fields)
+            .await
     }
 
     pub async fn refresh(&self, flow: &Flow, refresh_token: &str) -> Result<Tokens, OauthError> {
         let fields = refresh_fields(flow, refresh_token);
-        let mut tokens = self.token_call(flow, &self.at(flow.token_url), fields).await?;
+        let mut tokens = self
+            .token_call(flow, &self.at(flow.token_url), fields)
+            .await?;
         if tokens.refresh.is_none() {
             tokens.refresh = Some(refresh_token.to_owned());
         }
