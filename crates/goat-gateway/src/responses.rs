@@ -12,11 +12,7 @@ use goat_gateway_wire::{
 };
 use serde_json::Value;
 
-use crate::{
-    App, catalog, gateway_error, pool,
-    store::now,
-    upstream::forward_headers,
-};
+use crate::{App, gateway_error, pool, provider::Wire, store::now, upstream::forward_headers};
 
 pub async fn handle(
     State(app): State<App>,
@@ -35,15 +31,18 @@ pub async fn handle(
         .get("model")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let Some(target_model) = catalog::anthropic(model) else {
+    let Some(declared) = app.catalog().model("anthropic", model) else {
+        let known = app
+            .catalog()
+            .get("anthropic")
+            .map(|provider| provider.model_names().join(", "))
+            .unwrap_or_default();
         return responses_error(
             StatusCode::BAD_REQUEST,
-            format!(
-                "model {model:?} is not registered on this gateway. Known models: {}",
-                catalog::known_anthropic_models().join(", ")
-            ),
+            format!("model {model:?} is not registered on this gateway. Known models: {known}"),
         );
     };
+    let target_model = declared.target();
 
     if !request
         .get("stream")
@@ -112,13 +111,7 @@ pub async fn handle(
     let sent = app
         .inner
         .client
-        .post(format!(
-            "{}/v1/messages",
-            prepared
-                .base_url
-                .unwrap_or(&app.inner.anthropic_base_url)
-                .trim_end_matches('/')
-        ))
+        .post(upstream_url(&app, prepared.base_url))
         .headers(upstream_headers)
         .body(translated.body)
         .send()
@@ -253,6 +246,18 @@ fn nonce_seed() -> [u8; 8] {
         .map(|d| d.as_nanos() as u64)
         .unwrap_or_default();
     nanos.to_le_bytes()
+}
+
+pub(crate) fn upstream_url(app: &App, override_base: Option<&str>) -> String {
+    match override_base {
+        Some(base) => format!("{}/v1/messages", base.trim_end_matches('/')),
+        None => app
+            .catalog()
+            .get("anthropic")
+            .and_then(|provider| provider.endpoint(Wire::Messages))
+            .map(|endpoint| endpoint.url.clone())
+            .unwrap_or_default(),
+    }
 }
 
 fn pinned_account(request: &Value, app: &App) -> Option<String> {

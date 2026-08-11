@@ -140,7 +140,7 @@ async fn build_harness(accounts: &[(&str, &[u8])]) -> Harness {
     let issued = store.issue_key(&user.id, "test").unwrap();
     store.set_admin_key("gwa_test-admin").unwrap();
 
-    let app = App::new(store, ENVELOPE_KEY, format!("http://{upstream_addr}"));
+    let app = App::new(store, ENVELOPE_KEY, catalog_at(upstream_addr));
     let gateway = serve(app.clone().router()).await;
 
     Harness {
@@ -378,4 +378,9 @@ async fn a_non_streaming_request_is_refused_before_the_provider_is_called() {
 
     assert_eq!(status, 400);
     assert!(harness.seen.body.lock().unwrap().is_none());
+}
+
+fn catalog_at(upstream: SocketAddr) -> goat_gateway::provider::Catalog {
+    goat_gateway::provider::Catalog::builtin()
+        .with_base_url("anthropic", &format!("http://{upstream}"))
 }

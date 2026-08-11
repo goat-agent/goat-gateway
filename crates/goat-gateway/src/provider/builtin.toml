@@ -1,0 +1,44 @@
+[provider.anthropic]
+label = "Anthropic"
+limits = "headers"
+endpoints = [{ wire = "messages", url = "https://api.anthropic.com/v1/messages" }]
+headers = { "anthropic-version" = "2023-06-01" }
+
+[[provider.anthropic.models]]
+name = "claude-opus-5"
+thinking = "adaptive"
+max_tokens = 32000
+mid_conversation_system = true
+price = { input = 15000000, output = 75000000, cache_read = 1500000, cache_write = 18750000 }
+
+[[provider.anthropic.models]]
+name = "claude-sonnet-5"
+thinking = "adaptive"
+max_tokens = 32000
+mid_conversation_system = false
+price = { input = 3000000, output = 15000000, cache_read = 300000, cache_write = 3750000 }
+
+[[provider.anthropic.models]]
+name = "claude-fable-5"
+thinking = "adaptive"
+max_tokens = 32000
+mid_conversation_system = true
+
+[[provider.anthropic.models]]
+name = "claude-opus-4-8"
+thinking = "adaptive"
+max_tokens = 32000
+mid_conversation_system = true
+
+[[provider.anthropic.models]]
+name = "claude-haiku-4-5"
+thinking = "budget"
+max_tokens = 8192
+mid_conversation_system = false
+price = { input = 1000000, output = 5000000, cache_read = 100000, cache_write = 1250000 }
+
+[provider.openai]
+label = "OpenAI"
+limits = "headers"
+endpoints = [{ wire = "responses", url = "https://api.openai.com/v1/responses" }]
+models = []

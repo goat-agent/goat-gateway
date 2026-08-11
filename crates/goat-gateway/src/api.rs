@@ -5,10 +5,12 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
+use std::collections::BTreeMap;
+
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::{App, auth, catalog, pricing, store::AccountState};
+use crate::{App, auth, pricing, store::AccountState};
 
 async fn signin_providers() -> Response {
     let providers: Vec<_> = crate::oauth::FLOWS
@@ -154,7 +156,10 @@ pub fn router() -> Router<App> {
         .route("/api/pricing", get(price_table))
         .route("/api/signin/providers", get(signin_providers))
         .route("/api/signin", post(signin_begin))
-        .route("/api/signin/{session}", get(signin_status).post(signin_paste))
+        .route(
+            "/api/signin/{session}",
+            get(signin_status).post(signin_paste),
+        )
 }
 
 async fn overview(State(app): State<App>) -> Response {
@@ -270,12 +275,35 @@ async fn requests(State(app): State<App>) -> Response {
     }
 }
 
-async fn models() -> Response {
-    Json(json!({ "anthropic": catalog::known_anthropic_models() })).into_response()
+async fn models(State(app): State<App>) -> Response {
+    let by_provider: BTreeMap<&str, Vec<&str>> = app
+        .catalog()
+        .iter()
+        .map(|provider| (provider.id.as_str(), provider.model_names()))
+        .collect();
+    Json(json!(by_provider)).into_response()
 }
 
-async fn price_table() -> Response {
-    Json(json!({ "as_of": pricing::AS_OF, "prices": pricing::table() })).into_response()
+async fn price_table(State(app): State<App>) -> Response {
+    let prices: Vec<_> = app
+        .catalog()
+        .iter()
+        .flat_map(|provider| {
+            provider.models.iter().filter_map(move |model| {
+                model.price.map(|price| {
+                    json!({
+                        "provider": provider.id,
+                        "model": model.name,
+                        "input_per_mtok_micros": price.input,
+                        "output_per_mtok_micros": price.output,
+                        "cache_read_per_mtok_micros": price.cache_read,
+                        "cache_write_per_mtok_micros": price.cache_write,
+                    })
+                })
+            })
+        })
+        .collect();
+    Json(json!({ "as_of": pricing::AS_OF, "prices": prices })).into_response()
 }
 
 fn unique(values: impl Iterator<Item = String>) -> Vec<String> {

@@ -1,11 +1,11 @@
 pub mod api;
 pub mod auth;
-pub mod catalog;
 pub mod limits;
 pub mod messages;
 pub mod oauth;
 pub mod pool;
 pub mod pricing;
+pub mod provider;
 pub mod responses;
 pub mod store;
 pub mod upstream;
@@ -32,22 +32,18 @@ pub(crate) struct Inner {
     pub(crate) client: reqwest::Client,
     pub(crate) store: Store,
     pub(crate) envelopes: Envelopes,
-    pub(crate) anthropic_base_url: String,
+    pub(crate) catalog: crate::provider::Catalog,
     pub(crate) sessions: oauth::Sessions,
 }
 
 impl App {
-    pub fn new(
-        store: Store,
-        envelope_key: [u8; 32],
-        anthropic_base_url: impl Into<String>,
-    ) -> Self {
+    pub fn new(store: Store, envelope_key: [u8; 32], catalog: crate::provider::Catalog) -> Self {
         Self {
             inner: Arc::new(Inner {
                 client: reqwest::Client::new(),
                 store,
                 envelopes: Envelopes::new(&envelope_key),
-                anthropic_base_url: anthropic_base_url.into().trim_end_matches('/').to_owned(),
+                catalog,
                 sessions: oauth::Sessions::default(),
             }),
         }
@@ -55,6 +51,10 @@ impl App {
 
     pub fn store(&self) -> &Store {
         &self.inner.store
+    }
+
+    pub fn catalog(&self) -> &crate::provider::Catalog {
+        &self.inner.catalog
     }
 
     pub(crate) fn sessions(&self) -> &oauth::Sessions {
@@ -119,9 +119,12 @@ pub(crate) fn anthropic_error(status: StatusCode, kind: &str, message: String) -
     (status, axum::Json(body)).into_response()
 }
 
-pub fn anthropic_base_url_from_env() -> String {
-    std::env::var("GOAT_ANTHROPIC_BASE_URL")
-        .unwrap_or_else(|_| "https://api.anthropic.com".to_owned())
+pub fn catalog_from_env() -> crate::provider::Catalog {
+    let catalog = crate::provider::Catalog::builtin();
+    match std::env::var("GOAT_ANTHROPIC_BASE_URL") {
+        Ok(base) if !base.is_empty() => catalog.with_base_url("anthropic", &base),
+        _ => catalog,
+    }
 }
 
 pub fn envelope_key_from(master_key: &[u8; 32]) -> [u8; 32] {

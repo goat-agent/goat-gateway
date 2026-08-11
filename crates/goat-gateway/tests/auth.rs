@@ -45,7 +45,7 @@ async fn harness() -> Harness {
     let user = store.add_user("isac").unwrap();
     let issued = store.issue_key(&user.id, "맥북 Codex").unwrap();
 
-    let app = App::new(store.clone(), [3u8; 32], format!("http://{upstream_addr}"));
+    let app = App::new(store.clone(), [3u8; 32], catalog_at(upstream_addr));
     let addr = serve(app.router()).await;
 
     Harness {
@@ -202,4 +202,9 @@ async fn the_key_never_appears_in_a_listing() {
         !listing.contains(&harness.api_key),
         "a key is shown once at issue time and never again"
     );
+}
+
+fn catalog_at(upstream: SocketAddr) -> goat_gateway::provider::Catalog {
+    goat_gateway::provider::Catalog::builtin()
+        .with_base_url("anthropic", &format!("http://{upstream}"))
 }

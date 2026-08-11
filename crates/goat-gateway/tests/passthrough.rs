@@ -44,7 +44,7 @@ fn gateway_app(upstream: SocketAddr, envelope_key: [u8; 32]) -> (App, String) {
     let issued = store.issue_key(&user.id, "test").unwrap();
     store.set_admin_key("gwa_test-admin").unwrap();
     (
-        App::new(store, envelope_key, format!("http://{upstream}")),
+        App::new(store, envelope_key, catalog_at(upstream)),
         issued.secret,
     )
 }
@@ -167,4 +167,9 @@ async fn unknown_headers_survive_and_client_credentials_do_not() {
         "the client's own key is for us, not for the provider"
     );
     assert!(!headers.contains_key("authorization"));
+}
+
+fn catalog_at(upstream: SocketAddr) -> goat_gateway::provider::Catalog {
+    goat_gateway::provider::Catalog::builtin()
+        .with_base_url("anthropic", &format!("http://{upstream}"))
 }

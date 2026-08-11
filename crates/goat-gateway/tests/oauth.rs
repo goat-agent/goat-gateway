@@ -171,7 +171,7 @@ async fn a_signed_in_account_reaches_anthropic_as_a_bearer_with_the_oauth_beta()
     let user = store.add_user("isac").unwrap();
     let issued = store.issue_key(&user.id, "맥북").unwrap();
 
-    let app = App::new(store.clone(), [1u8; 32], format!("http://{upstream}"));
+    let app = App::new(store.clone(), [1u8; 32], catalog_at(upstream));
     let gateway = serve(app.router()).await;
 
     let status = reqwest::Client::new()
@@ -193,8 +193,7 @@ async fn a_signed_in_account_reaches_anthropic_as_a_bearer_with_the_oauth_beta()
          and the client's own gateway key must never travel upstream"
     );
     assert_eq!(
-        headers["anthropic-beta"],
-        "oauth-2025-04-20,claude-code-20250219",
+        headers["anthropic-beta"], "oauth-2025-04-20,claude-code-20250219",
         "the client's beta flags must survive alongside the one oauth requires"
     );
 }
@@ -223,7 +222,7 @@ async fn the_call_is_recorded_against_the_account_that_was_signed_in() {
     let user = store.add_user("mino").unwrap();
     let issued = store.issue_key(&user.id, "노트북").unwrap();
 
-    let app = App::new(store.clone(), [1u8; 32], format!("http://{upstream}"));
+    let app = App::new(store.clone(), [1u8; 32], catalog_at(upstream));
     let gateway = serve(app.router()).await;
 
     reqwest::Client::new()
@@ -288,4 +287,9 @@ async fn a_dead_sign_in_fails_the_call_with_the_providers_own_words() {
         "why the sign-in died only exists in their body: {message}"
     );
     assert!(message.contains("signed in again"));
+}
+
+fn catalog_at(upstream: SocketAddr) -> goat_gateway::provider::Catalog {
+    goat_gateway::provider::Catalog::builtin()
+        .with_base_url("anthropic", &format!("http://{upstream}"))
 }

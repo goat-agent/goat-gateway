@@ -87,13 +87,7 @@ pub async fn handle(
     let sent = app
         .inner
         .client
-        .post(format!(
-            "{}/v1/messages",
-            prepared
-                .base_url
-                .unwrap_or(&app.inner.anthropic_base_url)
-                .trim_end_matches('/')
-        ))
+        .post(crate::responses::upstream_url(&app, prepared.base_url))
         .headers(upstream_headers)
         .body(outgoing)
         .send()
