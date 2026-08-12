@@ -141,12 +141,7 @@ fn bearer() -> Key {
 }
 
 pub fn translatable(from: Wire, to: Wire) -> bool {
-    matches!(
-        (from, to),
-        (Wire::Responses, Wire::Messages)
-            | (Wire::Messages, Wire::Chat)
-            | (Wire::Chat, Wire::Messages)
-    )
+    crate::relay_path::path(from, to).is_some()
 }
 
 fn needs_thinking_declared(from: Wire, to: Wire) -> bool {

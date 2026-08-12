@@ -54,6 +54,12 @@ impl Mapping {
         }
     }
 
+    pub fn absorb(&mut self, other: Self) {
+        self.moved += other.moved;
+        self.added.extend(other.added);
+        self.dropped.extend(other.dropped);
+    }
+
     pub fn moved(&mut self) {
         self.moved += 1;
     }

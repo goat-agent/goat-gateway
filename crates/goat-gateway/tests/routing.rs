@@ -492,3 +492,46 @@ async fn a_chat_client_that_did_not_stream_gets_one_completion() {
     assert_eq!(whole["usage"]["prompt_tokens"], 1000);
     assert_eq!(whole["usage"]["completion_tokens"], 8);
 }
+
+#[tokio::test]
+async fn a_codex_client_reaches_a_coding_plan_two_formats_away() {
+    let harness = kimi_harness().await;
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/v1/responses", harness.gateway))
+        .header("x-api-key", &harness.key)
+        .json(&json!({
+            "model": "kimi-for-coding",
+            "stream": true,
+            "instructions": "Be terse.",
+            "input": [
+                { "role": "user", "content": [{ "type": "input_text", "text": "list the files" }] },
+            ],
+            "tools": [{
+                "type": "function",
+                "name": "bash",
+                "parameters": { "type": "object", "properties": {} },
+            }],
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        harness.reached().as_deref(),
+        Some("/coding/v1/chat/completions")
+    );
+
+    let sent: Value =
+        serde_json::from_slice(&harness.seen.body.lock().unwrap().clone().unwrap()).unwrap();
+    assert_eq!(
+        sent["messages"][0]["role"], "system",
+        "the instructions have to survive both hops"
+    );
+    assert_eq!(sent["tools"][0]["function"]["name"], "bash");
+
+    let body = response.text().await.unwrap();
+    assert!(body.contains("response.created"), "{body}");
+    assert!(body.contains("response.completed"), "{body}");
+}

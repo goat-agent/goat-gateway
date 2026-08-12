@@ -83,6 +83,8 @@ endpoints = [{ wire = "chat", url = "https://api.kimi.com/coding/v1/chat/complet
 
 [[provider.kimi.models]]
 name = "kimi-for-coding"
+thinking = "adaptive"
+max_tokens = 32000
 
 [provider.moonshot]
 label = "Moonshot"

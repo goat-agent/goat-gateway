@@ -259,15 +259,16 @@ pub async fn dispatch(
         Err(response) => return response,
     };
 
-    match (wire, ready.route.endpoint.wire) {
-        (from, to) if from == to => pass(incoming, ready).await,
-        (Wire::Responses, Wire::Messages) => crate::responses::translate(incoming, ready).await,
-        (Wire::Messages, Wire::Chat) => crate::chat::from_messages(incoming, ready).await,
-        (Wire::Chat, Wire::Messages) => crate::chat::to_messages(incoming, ready).await,
-        (from, to) => reject(
-            from,
+    let egress = ready.route.endpoint.wire;
+    if wire == egress {
+        return pass(incoming, ready).await;
+    }
+    match crate::relay_path::path(wire, egress) {
+        Some(hops) => crate::translate::run(incoming, ready, hops).await,
+        None => reject(
+            wire,
             StatusCode::BAD_REQUEST,
-            format!("this gateway cannot yet turn {from} into {to}"),
+            format!("this gateway cannot turn {wire} into {egress}"),
         ),
     }
 }
