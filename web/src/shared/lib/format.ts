@@ -64,7 +64,8 @@ export function ago(at: number | null | undefined, now = Date.now()) {
 }
 
 export function within(at: number | null | undefined, now = Date.now()) {
-  return at ? spanOf(Math.max(0, at - now)) : UNKNOWN;
+  if (!at) return UNKNOWN;
+  return at <= now ? "due" : spanOf(at - now);
 }
 
 function spanOf(ms: number) {

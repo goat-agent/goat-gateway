@@ -57,7 +57,7 @@ export function UsagePage() {
           <MetricPicker chosen={chosen} onPick={setChosen} />
         </PanelHead>
         {data ? (
-          <MetricChart buckets={data.series} metric={shown} bucketMs={data.bucket_ms} />
+          <MetricChart buckets={data.series} metric={shown} bucketMs={data.bucket_ms} space={by} />
         ) : (
           <div className="h-[188px]" />
         )}
@@ -67,7 +67,12 @@ export function UsagePage() {
         <Panel>
           <PanelHead title={shown.label} note={`by ${by}`} />
           {data ? (
-            <UsageBars slices={data.breakdown} metric={shown} onPick={(key) => set(by, key)} />
+            <UsageBars
+              slices={data.breakdown}
+              metric={shown}
+              space={by}
+              onPick={(key) => set(by, key)}
+            />
           ) : null}
         </Panel>
 
@@ -94,7 +99,7 @@ export function UsagePage() {
                       <span className="flex items-center gap-2">
                         <span
                           className="size-2 shrink-0 rounded-[2px]"
-                          style={{ background: seriesColor(slice.key) }}
+                          style={{ background: seriesColor(by, slice.key) }}
                         />
                         {slice.key || "unattributed"}
                       </span>

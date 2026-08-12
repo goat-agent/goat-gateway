@@ -15,10 +15,12 @@ export function MetricChart({
   buckets,
   metric,
   bucketMs,
+  space,
 }: {
   buckets: Bucket[];
   metric: Metric;
   bucketMs: number;
+  space: string;
 }) {
   const [hovered, setHovered] = useState<number>();
 
@@ -88,7 +90,7 @@ export function MetricChart({
                 y={piece.top}
                 width={across.bandwidth()}
                 height={piece.height}
-                fill={seriesColor(piece.key)}
+                fill={seriesColor(space, piece.key)}
                 opacity={hovered === undefined || hovered === stack.at ? 1 : 0.45}
               />
             ))}

@@ -121,7 +121,12 @@ export function OverviewPage() {
           <MetricPicker chosen={chosen} onPick={setChosen} />
         </PanelHead>
         {report ? (
-          <MetricChart buckets={report.series} metric={shown} bucketMs={report.bucket_ms} />
+          <MetricChart
+            buckets={report.series}
+            metric={shown}
+            bucketMs={report.bucket_ms}
+            space="provider"
+          />
         ) : (
           <div className="h-[188px]" />
         )}
@@ -152,7 +157,7 @@ export function OverviewPage() {
                     >
                       <span
                         className="size-2 shrink-0 rounded-[2px]"
-                        style={{ background: seriesColor(slice.key) }}
+                        style={{ background: seriesColor("provider", slice.key) }}
                       />
                       {labelOf(seen, slice.key)}
                     </Link>

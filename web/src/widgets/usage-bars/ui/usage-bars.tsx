@@ -4,10 +4,12 @@ import { seriesColor } from "@/shared/model/series";
 export function UsageBars({
   slices,
   metric,
+  space,
   onPick,
 }: {
   slices: Slice[];
   metric: Metric;
+  space: string;
   onPick?: (key: string) => void;
 }) {
   const rows = slices
@@ -46,7 +48,7 @@ export function UsageBars({
                 className="block h-full rounded-full"
                 style={{
                   width: `${Math.max(2, (row.value / widest) * 100)}%`,
-                  background: seriesColor(row.key),
+                  background: seriesColor(space, row.key),
                 }}
               />
             </span>
