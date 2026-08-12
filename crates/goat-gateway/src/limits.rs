@@ -99,7 +99,7 @@ pub fn from_answer(
 fn reading(value: &serde_json::Value) -> Option<f64> {
     value
         .as_f64()
-        .or_else(|| value.as_str().and_then(|text| parse_utilization(text)))
+        .or_else(|| value.as_str().and_then(parse_utilization))
 }
 
 pub fn parse(headers: &HeaderMap, now_ms: i64) -> Snapshot {
