@@ -263,6 +263,7 @@ pub async fn dispatch(
         (from, to) if from == to => pass(incoming, ready).await,
         (Wire::Responses, Wire::Messages) => crate::responses::translate(incoming, ready).await,
         (Wire::Messages, Wire::Chat) => crate::chat::from_messages(incoming, ready).await,
+        (Wire::Chat, Wire::Messages) => crate::chat::to_messages(incoming, ready).await,
         (from, to) => reject(
             from,
             StatusCode::BAD_REQUEST,

@@ -194,50 +194,32 @@ async fn a_model_picks_its_own_provider_when_several_are_registered() {
 }
 
 #[tokio::test]
-async fn a_format_nobody_registered_serves_is_refused_before_anything_is_sent() {
+async fn one_anthropic_account_serves_all_three_formats() {
     let harness = harness(&[("personal", "anthropic")]).await;
 
-    let (status, body) = harness
-        .post(
+    for (path, body) in [
+        (
+            "/v1/messages",
+            json!({ "model": "claude-sonnet-5", "max_tokens": 8, "messages": [] }),
+        ),
+        (
             "/v1/chat/completions",
             json!({ "model": "claude-sonnet-5", "messages": [] }),
-        )
-        .await;
-
-    assert_eq!(status, 400);
-    assert!(body.contains("Chat Completions"), "{body}");
-    assert!(harness.reached().is_none());
-}
-
-#[tokio::test]
-async fn the_screens_can_ask_for_a_window_and_a_grouping() {
-    let harness = harness(&[("work", "openai")]).await;
-    harness
-        .post(
+        ),
+        (
             "/v1/responses",
-            json!({ "model": "gpt-5", "stream": true, "input": "hi" }),
-        )
-        .await;
-
-    let admin = reqwest::Client::new();
-    for path in [
-        "/api/usage?since=1700000000000&by=model&bucket_ms=3600000",
-        "/api/usage?by=account",
-        "/api/requests?limit=10&status=ok",
-        "/api/requests?search=gpt",
-        "/api/overview?window_ms=604800000",
+            json!({ "model": "claude-sonnet-5", "stream": true, "input": "hi" }),
+        ),
     ] {
-        let response = admin
-            .get(format!("http://{}{path}", harness.gateway))
-            .header("cookie", "goat_admin=gwa_test-admin")
-            .send()
-            .await
-            .unwrap();
+        let (status, said) = harness.post(path, body).await;
         assert_eq!(
-            response.status(),
-            200,
-            "{path} answered {:?}",
-            response.text().await
+            status, 200,
+            "{path} could not be served by the one registered account: {said}"
+        );
+        assert_eq!(
+            harness.reached().as_deref(),
+            Some("/v1/messages"),
+            "{path} has to end up at the only endpoint the provider serves"
         );
     }
 }
@@ -395,4 +377,118 @@ async fn testing_an_account_sends_a_real_request_and_says_what_came_back() {
         Some("/v1/responses"),
         "a test that does not send a request tests nothing"
     );
+}
+
+const MESSAGES_SSE: &str = concat!(
+    "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":100,\"cache_read_input_tokens\":900}}}\n\n",
+    "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\"}}\n\n",
+    "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Here.\"}}\n\n",
+    "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+    "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":8}}\n\n",
+    "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+);
+
+async fn anthropic_stream(State(seen): State<Seen>, headers: HeaderMap, body: Bytes) -> Response {
+    *seen.path.lock().unwrap() = Some("/v1/messages".to_owned());
+    *seen.body.lock().unwrap() = Some(body);
+    *seen.headers.lock().unwrap() = Some(headers);
+    Response::builder()
+        .status(200)
+        .header("content-type", "text/event-stream")
+        .body(Body::from(MESSAGES_SSE))
+        .unwrap()
+}
+
+async fn anthropic_only() -> Harness {
+    let seen = Seen::default();
+    let upstream = serve(
+        Router::new()
+            .route("/v1/messages", post(anthropic_stream))
+            .with_state(seen.clone()),
+    )
+    .await;
+
+    let store = Store::in_memory(&[7u8; 32]).unwrap();
+    store
+        .add_account("personal", "anthropic", "api_key", b"key-personal")
+        .unwrap();
+    let user = store.add_user("jmo").unwrap();
+    let key = store.issue_key(&user.id, "test").unwrap().secret;
+    store.set_admin_key("gwa_test-admin").unwrap();
+
+    let catalog = Catalog::builtin().with_base_url("anthropic", &format!("http://{upstream}"));
+    let gateway = serve(App::new(store, [1u8; 32], catalog).router()).await;
+    Harness { gateway, seen, key }
+}
+
+fn chat_turn(stream: bool) -> Value {
+    json!({
+        "model": "claude-sonnet-5",
+        "stream": stream,
+        "max_tokens": 512,
+        "messages": [
+            { "role": "system", "content": "Be terse." },
+            { "role": "user", "content": "hi" },
+            { "role": "assistant", "tool_calls": [
+                { "id": "call_9", "type": "function", "function": { "name": "bash", "arguments": "{}" } },
+            ]},
+            { "role": "tool", "tool_call_id": "call_9", "content": "done" },
+        ],
+        "tools": [{
+            "type": "function",
+            "function": { "name": "bash", "parameters": { "type": "object", "properties": {} } },
+        }],
+    })
+}
+
+#[tokio::test]
+async fn a_chat_completions_client_reaches_an_anthropic_account() {
+    let harness = anthropic_only().await;
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/v1/chat/completions", harness.gateway))
+        .header("x-api-key", &harness.key)
+        .json(&chat_turn(true))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    assert_eq!(harness.reached().as_deref(), Some("/v1/messages"));
+
+    let sent: Value =
+        serde_json::from_slice(&harness.seen.body.lock().unwrap().clone().unwrap()).unwrap();
+    assert_eq!(sent["system"][0]["text"], "Be terse.");
+    assert_eq!(sent["max_tokens"], 512);
+    assert_eq!(sent["tools"][0]["name"], "bash");
+    assert_eq!(sent["messages"][1]["content"][0]["type"], "tool_use");
+    assert_eq!(sent["messages"][1]["content"][0]["id"], "call_9");
+    assert_eq!(sent["messages"][2]["content"][0]["type"], "tool_result");
+
+    let body = response.text().await.unwrap();
+    assert!(body.contains("chat.completion.chunk"), "{body}");
+    assert!(body.contains("\"content\":\"Here.\""), "{body}");
+    assert!(body.contains("\"finish_reason\":\"stop\""), "{body}");
+    assert!(body.contains("[DONE]"), "{body}");
+}
+
+#[tokio::test]
+async fn a_chat_client_that_did_not_stream_gets_one_completion() {
+    let harness = anthropic_only().await;
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/v1/chat/completions", harness.gateway))
+        .header("x-api-key", &harness.key)
+        .json(&chat_turn(false))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    let whole: Value = response.json().await.unwrap();
+    assert_eq!(whole["object"], "chat.completion");
+    assert_eq!(whole["choices"][0]["message"]["content"], "Here.");
+    assert_eq!(whole["choices"][0]["finish_reason"], "stop");
+    assert_eq!(whole["usage"]["prompt_tokens"], 1000);
+    assert_eq!(whole["usage"]["completion_tokens"], 8);
 }

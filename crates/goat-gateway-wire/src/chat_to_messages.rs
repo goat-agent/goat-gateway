@@ -1,6 +1,9 @@
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
-use crate::sse::{Frame, Parser};
+use crate::{
+    mapping::{Mapping, TranslateError, Translated},
+    sse::{Frame, Parser},
+};
 
 #[derive(Debug, Clone)]
 pub struct StreamTarget {
@@ -572,5 +575,507 @@ mod tests {
         let mut translator = StreamTranslator::new(target());
         assert!(translator.push(b"").is_empty());
         assert!(translator.finish().is_empty());
+    }
+}
+
+const WIRE: &str = "Anthropic Messages";
+
+const CARRIED: &[&str] = &[
+    "model",
+    "messages",
+    "tools",
+    "tool_choice",
+    "max_tokens",
+    "max_completion_tokens",
+    "temperature",
+    "top_p",
+    "stream",
+    "stream_options",
+    "stop",
+    "reasoning_effort",
+];
+
+#[derive(Debug, Clone)]
+pub struct Target {
+    pub model: String,
+    pub default_max_tokens: u32,
+}
+
+pub fn translate(input: &[u8], target: &Target) -> Result<Translated, TranslateError> {
+    let source: Value = serde_json::from_slice(input)?;
+    let mut mapping = Mapping::default();
+    let mut out = Map::new();
+
+    out.insert("model".into(), json!(target.model));
+    mapping.moved();
+
+    let mut system = Vec::new();
+    let mut messages: Vec<Value> = Vec::new();
+
+    for (index, message) in source
+        .get("messages")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice)
+        .iter()
+        .enumerate()
+    {
+        carry_back(message, index, &mut system, &mut messages, &mut mapping)?;
+    }
+
+    if !system.is_empty() {
+        out.insert("system".into(), Value::Array(system));
+    }
+    out.insert("messages".into(), Value::Array(messages));
+
+    if let Some(tools) = source.get("tools").and_then(Value::as_array) {
+        let declared: Result<Vec<Value>, TranslateError> = tools.iter().map(as_tool).collect();
+        out.insert("tools".into(), Value::Array(declared?));
+        mapping.moved();
+    }
+    if let Some(choice) = source.get("tool_choice") {
+        out.insert("tool_choice".into(), as_anthropic_choice(choice)?);
+        mapping.moved();
+    }
+
+    let ceiling = source
+        .get("max_tokens")
+        .or_else(|| source.get("max_completion_tokens"))
+        .and_then(Value::as_u64);
+    out.insert(
+        "max_tokens".into(),
+        json!(ceiling.unwrap_or(u64::from(target.default_max_tokens))),
+    );
+    if ceiling.is_some() {
+        mapping.moved();
+    } else {
+        mapping.added(
+            "/max_tokens",
+            "the Messages format requires a ceiling and the request named none",
+        );
+    }
+
+    for field in ["temperature", "top_p", "stream"] {
+        if let Some(value) = source.get(field) {
+            out.insert(field.into(), value.clone());
+            mapping.moved();
+        }
+    }
+    if let Some(stop) = source.get("stop") {
+        out.insert(
+            "stop_sequences".into(),
+            match stop {
+                Value::String(one) => json!([one]),
+                other => other.clone(),
+            },
+        );
+        mapping.moved();
+    }
+    if source.get("stream_options").is_some() {
+        mapping.dropped(
+            "/stream_options",
+            "the Messages format always reports usage, so there is nothing to ask for",
+        );
+    }
+    if source.get("reasoning_effort").is_some() {
+        mapping.dropped(
+            "/reasoning_effort",
+            "how hard a model thinks is asked for as a token budget here, which this request did not give",
+        );
+    }
+
+    mapping.mind_the_rest(&source, CARRIED, WIRE);
+
+    Ok(Translated {
+        body: serde_json::to_vec(&Value::Object(out))?,
+        mapping,
+    })
+}
+
+fn carry_back(
+    message: &Value,
+    index: usize,
+    system: &mut Vec<Value>,
+    out: &mut Vec<Value>,
+    mapping: &mut Mapping,
+) -> Result<(), TranslateError> {
+    let role = message
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or("user");
+    let at = format!("/messages/{index}");
+
+    if role == "system" || role == "developer" {
+        for block in spoken_blocks(message.get("content").unwrap_or(&Value::Null)) {
+            system.push(block);
+        }
+        mapping.moved();
+        return Ok(());
+    }
+
+    if role == "tool" {
+        let result = json!({
+            "type": "tool_result",
+            "tool_use_id": message.get("tool_call_id").cloned().unwrap_or(Value::Null),
+            "content": joined(message.get("content").unwrap_or(&Value::Null)),
+        });
+        mapping.moved();
+        if let Some(last) = out.last_mut()
+            && last.get("role").and_then(Value::as_str) == Some("user")
+            && let Some(blocks) = last.get_mut("content").and_then(Value::as_array_mut)
+        {
+            blocks.insert(0, result);
+            return Ok(());
+        }
+        out.push(json!({ "role": "user", "content": [result] }));
+        return Ok(());
+    }
+
+    let mut blocks = spoken_blocks(message.get("content").unwrap_or(&Value::Null));
+    if !blocks.is_empty() {
+        mapping.moved();
+    }
+
+    for (position, call) in message
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice)
+        .iter()
+        .enumerate()
+    {
+        let function = call.get("function").unwrap_or(&Value::Null);
+        let arguments = function
+            .get("arguments")
+            .and_then(Value::as_str)
+            .unwrap_or("{}");
+        blocks.push(json!({
+            "type": "tool_use",
+            "id": call.get("id").cloned().unwrap_or(Value::Null),
+            "name": function.get("name").cloned().unwrap_or(Value::Null),
+            "input": serde_json::from_str::<Value>(arguments).map_err(|error| {
+                TranslateError::Malformed {
+                    what: format!("{at}/tool_calls/{position}/function/arguments"),
+                    detail: format!("a tool call carries its arguments as JSON text: {error}"),
+                }
+            })?,
+        }));
+        mapping.moved();
+    }
+
+    if blocks.is_empty() {
+        return Ok(());
+    }
+    out.push(json!({ "role": role, "content": blocks }));
+    Ok(())
+}
+
+fn spoken_blocks(content: &Value) -> Vec<Value> {
+    match content {
+        Value::String(text) if !text.is_empty() => {
+            vec![json!({ "type": "text", "text": text })]
+        }
+        Value::Array(parts) => parts.iter().filter_map(as_block).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn as_block(part: &Value) -> Option<Value> {
+    match part.get("type").and_then(Value::as_str) {
+        Some("text") => Some(json!({
+            "type": "text",
+            "text": part.get("text").and_then(Value::as_str).unwrap_or_default(),
+        })),
+        Some("image_url") => {
+            let url = part.get("image_url")?.get("url")?.as_str()?;
+            let (media, data) = url
+                .strip_prefix("data:")?
+                .split_once(";base64,")
+                .unwrap_or(("image/png", url));
+            Some(json!({
+                "type": "image",
+                "source": { "type": "base64", "media_type": media, "data": data },
+            }))
+        }
+        _ => None,
+    }
+}
+
+fn joined(content: &Value) -> String {
+    match content {
+        Value::String(text) => text.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        _ => String::new(),
+    }
+}
+
+fn as_tool(tool: &Value) -> Result<Value, TranslateError> {
+    let function = tool.get("function").unwrap_or(&Value::Null);
+    let Some(name) = function.get("name").and_then(Value::as_str) else {
+        return Err(TranslateError::NoCounterpart {
+            what: format!(
+                "a {:?} tool",
+                tool.get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("nameless")
+            ),
+            wire: WIRE,
+        });
+    };
+    let mut declared = Map::new();
+    declared.insert("name".into(), json!(name));
+    if let Some(description) = function.get("description") {
+        declared.insert("description".into(), description.clone());
+    }
+    declared.insert(
+        "input_schema".into(),
+        function
+            .get("parameters")
+            .cloned()
+            .unwrap_or_else(|| json!({ "type": "object", "properties": {} })),
+    );
+    Ok(Value::Object(declared))
+}
+
+fn as_anthropic_choice(choice: &Value) -> Result<Value, TranslateError> {
+    match choice {
+        Value::String(named) => match named.as_str() {
+            "auto" => Ok(json!({ "type": "auto" })),
+            "required" => Ok(json!({ "type": "any" })),
+            "none" => Ok(json!({ "type": "none" })),
+            other => Err(TranslateError::NoCounterpart {
+                what: format!("tool_choice {other:?}"),
+                wire: WIRE,
+            }),
+        },
+        Value::Object(_) => Ok(json!({
+            "type": "tool",
+            "name": choice
+                .get("function")
+                .and_then(|function| function.get("name"))
+                .cloned()
+                .unwrap_or(Value::Null),
+        })),
+        other => Err(TranslateError::NoCounterpart {
+            what: format!("tool_choice {other}"),
+            wire: WIRE,
+        }),
+    }
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::*;
+
+    fn target() -> Target {
+        Target {
+            model: "claude-sonnet-5".into(),
+            default_max_tokens: 32000,
+        }
+    }
+
+    fn sent(request: Value) -> Value {
+        let out = translate(&serde_json::to_vec(&request).unwrap(), &target()).unwrap();
+        serde_json::from_slice(&out.body).unwrap()
+    }
+
+    #[test]
+    fn a_system_message_becomes_the_system_prompt() {
+        let out = sent(json!({
+            "model": "gpt-5",
+            "messages": [
+                { "role": "system", "content": "Be terse." },
+                { "role": "user", "content": "hi" },
+            ],
+        }));
+
+        assert_eq!(out["model"], "claude-sonnet-5");
+        assert_eq!(out["system"][0]["text"], "Be terse.");
+        assert_eq!(out["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(out["messages"][0]["content"][0]["text"], "hi");
+    }
+
+    #[test]
+    fn a_developer_message_is_a_system_prompt_by_another_name() {
+        let out = sent(json!({
+            "messages": [{ "role": "developer", "content": "Be terse." }],
+        }));
+        assert_eq!(out["system"][0]["text"], "Be terse.");
+    }
+
+    #[test]
+    fn a_tool_call_and_its_result_come_back_as_blocks() {
+        let out = sent(json!({
+            "messages": [
+                { "role": "assistant", "content": "on it", "tool_calls": [{
+                    "id": "call_9",
+                    "type": "function",
+                    "function": { "name": "bash", "arguments": "{\"cmd\":\"ls\"}" },
+                }]},
+                { "role": "tool", "tool_call_id": "call_9", "content": "a.txt" },
+            ],
+        }));
+
+        assert_eq!(out["messages"][0]["role"], "assistant");
+        assert_eq!(out["messages"][0]["content"][1]["type"], "tool_use");
+        assert_eq!(out["messages"][0]["content"][1]["id"], "call_9");
+        assert_eq!(out["messages"][0]["content"][1]["input"]["cmd"], "ls");
+
+        assert_eq!(out["messages"][1]["role"], "user");
+        assert_eq!(out["messages"][1]["content"][0]["type"], "tool_result");
+        assert_eq!(out["messages"][1]["content"][0]["tool_use_id"], "call_9");
+    }
+
+    #[test]
+    fn two_results_for_one_turn_share_a_single_user_message() {
+        let out = sent(json!({
+            "messages": [
+                { "role": "assistant", "tool_calls": [
+                    { "id": "a", "function": { "name": "one", "arguments": "{}" } },
+                    { "id": "b", "function": { "name": "two", "arguments": "{}" } },
+                ]},
+                { "role": "tool", "tool_call_id": "a", "content": "first" },
+                { "role": "tool", "tool_call_id": "b", "content": "second" },
+            ],
+        }));
+
+        let roles: Vec<&str> = out["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            roles,
+            ["assistant", "user"],
+            "the Messages format wants every result for a turn in one message"
+        );
+        assert_eq!(out["messages"][1]["content"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_ceiling_is_required_so_one_is_supplied_and_said_so() {
+        let out = translate(
+            &serde_json::to_vec(&json!({ "messages": [] })).unwrap(),
+            &target(),
+        )
+        .unwrap();
+        let body: Value = serde_json::from_slice(&out.body).unwrap();
+
+        assert_eq!(body["max_tokens"], 32000);
+        assert!(
+            out.mapping
+                .added
+                .iter()
+                .any(|note| note.pointer == "/max_tokens")
+        );
+    }
+
+    #[test]
+    fn max_completion_tokens_counts_as_a_ceiling() {
+        let out = sent(json!({ "messages": [], "max_completion_tokens": 512 }));
+        assert_eq!(out["max_tokens"], 512);
+    }
+
+    #[test]
+    fn a_tool_declaration_comes_back_out_of_its_function_wrapper() {
+        let out = sent(json!({
+            "messages": [],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "description": "run it",
+                    "parameters": { "type": "object", "properties": {} },
+                },
+            }],
+            "tool_choice": "required",
+        }));
+
+        assert_eq!(out["tools"][0]["name"], "bash");
+        assert_eq!(out["tools"][0]["input_schema"]["type"], "object");
+        assert!(out["tools"][0].get("function").is_none());
+        assert_eq!(out["tool_choice"]["type"], "any");
+    }
+
+    #[test]
+    fn naming_one_tool_picks_that_tool() {
+        let out = sent(json!({
+            "messages": [],
+            "tool_choice": { "type": "function", "function": { "name": "bash" } },
+        }));
+        assert_eq!(
+            out["tool_choice"],
+            json!({ "type": "tool", "name": "bash" })
+        );
+    }
+
+    #[test]
+    fn a_single_stop_string_becomes_a_list_of_one() {
+        assert_eq!(
+            sent(json!({ "messages": [], "stop": "\n\n" }))["stop_sequences"],
+            json!(["\n\n"])
+        );
+        assert_eq!(
+            sent(json!({ "messages": [], "stop": ["a", "b"] }))["stop_sequences"],
+            json!(["a", "b"])
+        );
+    }
+
+    #[test]
+    fn an_image_comes_back_out_of_its_data_url() {
+        let out = sent(json!({
+            "messages": [{ "role": "user", "content": [
+                { "type": "text", "text": "what is this" },
+                { "type": "image_url", "image_url": { "url": "data:image/png;base64,AAAA" } },
+            ]}],
+        }));
+
+        assert_eq!(out["messages"][0]["content"][1]["type"], "image");
+        assert_eq!(
+            out["messages"][0]["content"][1]["source"]["media_type"],
+            "image/png"
+        );
+        assert_eq!(out["messages"][0]["content"][1]["source"]["data"], "AAAA");
+    }
+
+    #[test]
+    fn arguments_that_are_not_json_stop_the_request() {
+        let error = translate(
+            &serde_json::to_vec(&json!({
+                "messages": [{ "role": "assistant", "tool_calls": [
+                    { "id": "a", "function": { "name": "bash", "arguments": "not json" } },
+                ]}],
+            }))
+            .unwrap(),
+            &target(),
+        )
+        .unwrap_err();
+        assert!(matches!(error, TranslateError::Malformed { .. }));
+    }
+
+    #[test]
+    fn a_field_we_do_not_understand_is_written_down() {
+        let out = translate(
+            &serde_json::to_vec(&json!({
+                "messages": [],
+                "logit_bias": { "50256": -100 },
+                "seed": 7,
+            }))
+            .unwrap(),
+            &target(),
+        )
+        .unwrap();
+
+        let named: Vec<&str> = out
+            .mapping
+            .dropped
+            .iter()
+            .map(|note| note.pointer.as_str())
+            .collect();
+        assert!(named.contains(&"/logit_bias"), "{named:?}");
+        assert!(named.contains(&"/seed"), "{named:?}");
     }
 }

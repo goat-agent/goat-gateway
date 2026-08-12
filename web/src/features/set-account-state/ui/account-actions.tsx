@@ -13,23 +13,34 @@ type Reached = {
   took_ms: number;
 };
 
+type Answer = { good: boolean; says: string; why: string };
+
+function read(reached: Reached): Answer {
+  return reached.ok
+    ? {
+        good: true,
+        says: `answered in ${duration(reached.took_ms)}`,
+        why: `${reached.model ?? "the first declared model"} replied`,
+      }
+    : {
+        good: false,
+        says: `refused with ${reached.status}`,
+        why: reached.said ?? "the provider gave no reason",
+      };
+}
+
 export function AccountActions({ account, onChanged }: { account: Account; onChanged: () => void }) {
   const [trying, setTrying] = useState(false);
-  const [reached, setReached] = useState<Reached>();
+  const [answer, setAnswer] = useState<Answer>();
 
   const at = `/api/accounts/${encodeURIComponent(account.name)}`;
   const setState = (state: string) => send(`${at}/state`, { state }).then(onChanged);
 
   return (
     <span className="flex items-center justify-end gap-1">
-      {reached ? (
-        <Badge
-          tone={reached.ok ? "good" : "critical"}
-          title={reached.said ?? `answered ${reached.status}`}
-        >
-          {reached.ok
-            ? `answered in ${duration(reached.took_ms)}`
-            : `refused with ${reached.status}`}
+      {answer ? (
+        <Badge tone={answer.good ? "good" : "critical"} title={answer.why}>
+          {answer.says}
         </Badge>
       ) : null}
 
@@ -39,12 +50,15 @@ export function AccountActions({ account, onChanged }: { account: Account; onCha
         disabled={trying}
         onClick={() => {
           setTrying(true);
-          setReached(undefined);
-          send<Reached>(at + "/test", {})
-            .then((answer) => {
-              setReached(answer);
+          setAnswer(undefined);
+          send<Reached>(`${at}/test`, {})
+            .then((reached) => {
+              setAnswer(read(reached));
               onChanged();
             })
+            .catch((error: Error) =>
+              setAnswer({ good: false, says: "could not try", why: error.message }),
+            )
             .finally(() => setTrying(false));
         }}
       >

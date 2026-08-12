@@ -143,7 +143,9 @@ fn bearer() -> Key {
 pub fn translatable(from: Wire, to: Wire) -> bool {
     matches!(
         (from, to),
-        (Wire::Responses, Wire::Messages) | (Wire::Messages, Wire::Chat)
+        (Wire::Responses, Wire::Messages)
+            | (Wire::Messages, Wire::Chat)
+            | (Wire::Chat, Wire::Messages)
     )
 }
 
@@ -570,10 +572,22 @@ mod tests {
     #[test]
     fn a_format_no_registered_account_serves_says_so() {
         let catalog = Catalog::builtin();
-        let error = catalog
-            .route(Wire::Chat, "whatever", &["anthropic".to_owned()])
-            .unwrap_err();
+        let error = catalog.route(Wire::Chat, "whatever", &[]).unwrap_err();
         assert!(matches!(error, Unroutable::NobodySpeaks { .. }));
+    }
+
+    #[test]
+    fn one_anthropic_account_can_be_reached_from_any_of_the_three() {
+        let catalog = Catalog::builtin();
+        let registered = ["anthropic".to_owned()];
+
+        for wire in [Wire::Messages, Wire::Responses, Wire::Chat] {
+            let route = catalog
+                .route(wire, "claude-sonnet-5", &registered)
+                .unwrap_or_else(|error| panic!("{wire} could not be served: {error}"));
+            assert_eq!(route.provider, "anthropic");
+            assert_eq!(route.endpoint.wire, Wire::Messages);
+        }
     }
 
     #[test]

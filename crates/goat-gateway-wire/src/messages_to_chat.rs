@@ -431,3 +431,491 @@ mod tests {
         );
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct StreamTarget {
+    pub completion_id: String,
+    pub model: String,
+    pub created: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Speaking {
+    Text,
+    Thinking,
+    Tool(usize),
+}
+
+pub struct StreamTranslator {
+    parser: crate::sse::Parser,
+    target: StreamTarget,
+    opened: bool,
+    finished: bool,
+    speaking: Option<Speaking>,
+    calls: usize,
+    finish_reason: Option<&'static str>,
+    usage: Option<Value>,
+    spoken: String,
+    thought: String,
+    tools: Vec<Value>,
+}
+
+impl StreamTranslator {
+    pub fn new(target: StreamTarget) -> Self {
+        Self {
+            parser: crate::sse::Parser::default(),
+            target,
+            opened: false,
+            finished: false,
+            speaking: None,
+            calls: 0,
+            finish_reason: None,
+            usage: None,
+            spoken: String::new(),
+            thought: String::new(),
+            tools: Vec::new(),
+        }
+    }
+
+    pub fn push(&mut self, chunk: &[u8]) -> Vec<u8> {
+        let mut out = String::new();
+        for frame in self.parser.push(chunk) {
+            self.take(&frame, &mut out);
+        }
+        out.into_bytes()
+    }
+
+    pub fn finish(&mut self) -> Vec<u8> {
+        let mut out = String::new();
+        if self.opened && !self.finished {
+            self.finished = true;
+            out.push_str(&self.chunk(json!({}), self.finish_reason.or(Some("stop"))));
+            if let Some(usage) = self.usage.clone() {
+                out.push_str(&self.tally(&usage));
+            }
+            out.push_str("data: [DONE]\n\n");
+        }
+        out.into_bytes()
+    }
+
+    pub fn assembled(&self) -> Value {
+        let mut message = Map::new();
+        message.insert("role".into(), json!("assistant"));
+        message.insert(
+            "content".into(),
+            if self.spoken.is_empty() {
+                Value::Null
+            } else {
+                json!(self.spoken)
+            },
+        );
+        if !self.thought.is_empty() {
+            message.insert("reasoning_content".into(), json!(self.thought));
+        }
+        if !self.tools.is_empty() {
+            message.insert("tool_calls".into(), Value::Array(self.tools.clone()));
+        }
+
+        json!({
+            "id": self.target.completion_id,
+            "object": "chat.completion",
+            "created": self.target.created,
+            "model": self.target.model,
+            "choices": [{
+                "index": 0,
+                "message": Value::Object(message),
+                "finish_reason": self.finish_reason.unwrap_or("stop"),
+            }],
+            "usage": self.usage.clone().unwrap_or(Value::Null),
+        })
+    }
+
+    fn take(&mut self, frame: &crate::sse::Frame, out: &mut String) {
+        let Some(event) = frame.json() else { return };
+        match event
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+        {
+            "message_start" => {
+                self.opened = true;
+                out.push_str(&self.chunk(json!({ "role": "assistant", "content": "" }), None));
+                self.note_usage(event.get("message").and_then(|m| m.get("usage")));
+            }
+            "content_block_start" => self.opened_block(&event, out),
+            "content_block_delta" => self.wrote(&event, out),
+            "content_block_stop" => self.speaking = None,
+            "message_delta" => {
+                if let Some(reason) = event
+                    .get("delta")
+                    .and_then(|delta| delta.get("stop_reason"))
+                    .and_then(Value::as_str)
+                {
+                    self.finish_reason = Some(match reason {
+                        "max_tokens" => "length",
+                        "tool_use" => "tool_calls",
+                        "refusal" => "content_filter",
+                        _ => "stop",
+                    });
+                }
+                self.note_usage(event.get("usage"));
+            }
+            "error" => {
+                self.finished = true;
+                out.push_str(&format!(
+                    "data: {}\n\n",
+                    json!({ "error": event.get("error").cloned().unwrap_or(Value::Null) })
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    fn opened_block(&mut self, event: &Value, out: &mut String) {
+        let block = event.get("content_block").unwrap_or(&Value::Null);
+        match block
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+        {
+            "text" => self.speaking = Some(Speaking::Text),
+            "thinking" | "redacted_thinking" => self.speaking = Some(Speaking::Thinking),
+            "tool_use" => {
+                let slot = self.calls;
+                self.calls += 1;
+                self.speaking = Some(Speaking::Tool(slot));
+                self.tools.push(json!({
+                    "index": slot,
+                    "id": block.get("id").cloned().unwrap_or(Value::Null),
+                    "type": "function",
+                    "function": {
+                        "name": block.get("name").cloned().unwrap_or(Value::Null),
+                        "arguments": "",
+                    },
+                }));
+                out.push_str(&self.chunk(
+                    json!({ "tool_calls": [{
+                        "index": slot,
+                        "id": block.get("id").cloned().unwrap_or(Value::Null),
+                        "type": "function",
+                        "function": {
+                            "name": block.get("name").cloned().unwrap_or(Value::Null),
+                            "arguments": "",
+                        },
+                    }] }),
+                    None,
+                ));
+            }
+            _ => self.speaking = None,
+        }
+    }
+
+    fn wrote(&mut self, event: &Value, out: &mut String) {
+        let delta = event.get("delta").unwrap_or(&Value::Null);
+        match self.speaking {
+            Some(Speaking::Text) => {
+                if let Some(text) = delta.get("text").and_then(Value::as_str) {
+                    self.spoken.push_str(text);
+                    out.push_str(&self.chunk(json!({ "content": text }), None));
+                }
+            }
+            Some(Speaking::Thinking) => {
+                if let Some(text) = delta.get("thinking").and_then(Value::as_str) {
+                    self.thought.push_str(text);
+                    out.push_str(&self.chunk(json!({ "reasoning_content": text }), None));
+                }
+            }
+            Some(Speaking::Tool(slot)) => {
+                if let Some(fragment) = delta.get("partial_json").and_then(Value::as_str) {
+                    if let Some(call) = self.tools.get_mut(slot) {
+                        let held = call["function"]["arguments"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_owned();
+                        call["function"]["arguments"] = json!(format!("{held}{fragment}"));
+                    }
+                    out.push_str(&self.chunk(
+                        json!({ "tool_calls": [{
+                            "index": slot,
+                            "function": { "arguments": fragment },
+                        }] }),
+                        None,
+                    ));
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn note_usage(&mut self, usage: Option<&Value>) {
+        let Some(usage) = usage.filter(|usage| !usage.is_null()) else {
+            return;
+        };
+        let read = |name: &str| usage.get(name).and_then(Value::as_i64);
+        let held = self.usage.get_or_insert_with(
+            || json!({ "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0 }),
+        );
+
+        let cached = read("cache_read_input_tokens").unwrap_or(0);
+        if let Some(input) = read("input_tokens") {
+            held["prompt_tokens"] = json!(input + cached);
+            held["prompt_tokens_details"] = json!({ "cached_tokens": cached });
+        }
+        if let Some(output) = read("output_tokens") {
+            held["completion_tokens"] = json!(output);
+        }
+        let prompt = held["prompt_tokens"].as_i64().unwrap_or(0);
+        let completion = held["completion_tokens"].as_i64().unwrap_or(0);
+        held["total_tokens"] = json!(prompt + completion);
+    }
+
+    fn chunk(&self, delta: Value, finish: Option<&str>) -> String {
+        format!(
+            "data: {}\n\n",
+            json!({
+                "id": self.target.completion_id,
+                "object": "chat.completion.chunk",
+                "created": self.target.created,
+                "model": self.target.model,
+                "choices": [{ "index": 0, "delta": delta, "finish_reason": finish }],
+            })
+        )
+    }
+
+    fn tally(&self, usage: &Value) -> String {
+        format!(
+            "data: {}\n\n",
+            json!({
+                "id": self.target.completion_id,
+                "object": "chat.completion.chunk",
+                "created": self.target.created,
+                "model": self.target.model,
+                "choices": [],
+                "usage": usage,
+            })
+        )
+    }
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+    use crate::sse::{Frame, Parser};
+
+    fn target() -> StreamTarget {
+        StreamTarget {
+            completion_id: "chatcmpl_1".into(),
+            model: "gpt-5".into(),
+            created: 1_700_000_000,
+        }
+    }
+
+    fn anthropic(events: &[(&str, Value)]) -> String {
+        events
+            .iter()
+            .map(|(event, data)| format!("event: {event}\ndata: {data}\n\n"))
+            .collect()
+    }
+
+    fn run(text: &str) -> (Vec<Frame>, StreamTranslator) {
+        let mut translator = StreamTranslator::new(target());
+        let mut out = translator.push(text.as_bytes());
+        out.extend(translator.finish());
+        (Parser::default().push(&out), translator)
+    }
+
+    fn deltas(frames: &[Frame], field: &str) -> String {
+        frames
+            .iter()
+            .filter_map(|frame| frame.json())
+            .filter_map(|chunk| {
+                chunk["choices"][0]["delta"][field]
+                    .as_str()
+                    .map(str::to_owned)
+            })
+            .collect()
+    }
+
+    const SPEAKING: &[(&str, &str)] = &[];
+
+    #[test]
+    fn text_and_thinking_arrive_on_the_fields_chat_clients_read() {
+        let text = anthropic(&[
+            (
+                "message_start",
+                json!({ "type": "message_start", "message": { "usage": { "input_tokens": 10 } } }),
+            ),
+            (
+                "content_block_start",
+                json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "thinking" } }),
+            ),
+            (
+                "content_block_delta",
+                json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "thinking_delta", "thinking": "weigh" } }),
+            ),
+            (
+                "content_block_delta",
+                json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "thinking_delta", "thinking": "ing" } }),
+            ),
+            (
+                "content_block_stop",
+                json!({ "type": "content_block_stop", "index": 0 }),
+            ),
+            (
+                "content_block_start",
+                json!({ "type": "content_block_start", "index": 1, "content_block": { "type": "text" } }),
+            ),
+            (
+                "content_block_delta",
+                json!({ "type": "content_block_delta", "index": 1, "delta": { "type": "text_delta", "text": "Here." } }),
+            ),
+            (
+                "content_block_stop",
+                json!({ "type": "content_block_stop", "index": 1 }),
+            ),
+            (
+                "message_delta",
+                json!({ "type": "message_delta", "delta": { "stop_reason": "end_turn" }, "usage": { "output_tokens": 8 } }),
+            ),
+            ("message_stop", json!({ "type": "message_stop" })),
+        ]);
+
+        let (frames, _) = run(&text);
+        assert_eq!(deltas(&frames, "reasoning_content"), "weighing");
+        assert_eq!(deltas(&frames, "content"), "Here.");
+
+        let ended = frames
+            .iter()
+            .filter_map(|frame| frame.json())
+            .find(|chunk| chunk["choices"][0]["finish_reason"] == "stop")
+            .expect("a chat client waits for a finish_reason");
+        assert_eq!(ended["object"], "chat.completion.chunk");
+
+        let raw: String = frames.iter().map(|frame| frame.data.clone()).collect();
+        assert!(raw.contains("[DONE]"), "a chat stream ends with [DONE]");
+        let _ = SPEAKING;
+    }
+
+    #[test]
+    fn a_tool_use_block_becomes_an_indexed_tool_call() {
+        let text = anthropic(&[
+            (
+                "message_start",
+                json!({ "type": "message_start", "message": {} }),
+            ),
+            (
+                "content_block_start",
+                json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "tool_use", "id": "toolu_01A", "name": "bash" } }),
+            ),
+            (
+                "content_block_delta",
+                json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "input_json_delta", "partial_json": "{\"cmd\"" } }),
+            ),
+            (
+                "content_block_delta",
+                json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "input_json_delta", "partial_json": ":\"ls\"}" } }),
+            ),
+            (
+                "content_block_stop",
+                json!({ "type": "content_block_stop", "index": 0 }),
+            ),
+            (
+                "message_delta",
+                json!({ "type": "message_delta", "delta": { "stop_reason": "tool_use" } }),
+            ),
+        ]);
+
+        let (frames, translator) = run(&text);
+
+        let opened = frames
+            .iter()
+            .filter_map(|frame| frame.json())
+            .find(|chunk| chunk["choices"][0]["delta"]["tool_calls"][0]["id"] == "toolu_01A")
+            .expect("the id has to reach the client unchanged");
+        assert_eq!(opened["choices"][0]["delta"]["tool_calls"][0]["index"], 0);
+        assert_eq!(
+            opened["choices"][0]["delta"]["tool_calls"][0]["function"]["name"],
+            "bash"
+        );
+
+        let arguments: String = frames
+            .iter()
+            .filter_map(|frame| frame.json())
+            .filter_map(|chunk| {
+                chunk["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+                    .as_str()
+                    .map(str::to_owned)
+            })
+            .collect();
+        assert_eq!(arguments, r#"{"cmd":"ls"}"#);
+
+        let ended = frames
+            .iter()
+            .filter_map(|frame| frame.json())
+            .find(|chunk| !chunk["choices"][0]["finish_reason"].is_null())
+            .unwrap();
+        assert_eq!(ended["choices"][0]["finish_reason"], "tool_calls");
+
+        let whole = translator.assembled();
+        assert_eq!(
+            whole["choices"][0]["message"]["tool_calls"][0]["id"],
+            "toolu_01A"
+        );
+        assert_eq!(
+            whole["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"],
+            r#"{"cmd":"ls"}"#
+        );
+    }
+
+    #[test]
+    fn the_cache_is_counted_once_in_the_prompt_total() {
+        let text = anthropic(&[
+            (
+                "message_start",
+                json!({ "type": "message_start", "message": { "usage": { "input_tokens": 100, "cache_read_input_tokens": 900 } } }),
+            ),
+            (
+                "message_delta",
+                json!({ "type": "message_delta", "delta": { "stop_reason": "end_turn" }, "usage": { "output_tokens": 42 } }),
+            ),
+        ]);
+
+        let (frames, translator) = run(&text);
+        let counted = frames
+            .iter()
+            .filter_map(|frame| frame.json())
+            .find(|chunk| !chunk["usage"].is_null())
+            .expect("a chat client reads usage off the last chunk");
+
+        assert_eq!(counted["usage"]["prompt_tokens"], 1000);
+        assert_eq!(
+            counted["usage"]["prompt_tokens_details"]["cached_tokens"],
+            900
+        );
+        assert_eq!(counted["usage"]["completion_tokens"], 42);
+        assert_eq!(counted["usage"]["total_tokens"], 1042);
+        assert_eq!(translator.assembled()["usage"]["total_tokens"], 1042);
+    }
+
+    #[test]
+    fn a_stream_that_dies_is_relayed_rather_than_ended_cleanly() {
+        let text = anthropic(&[
+            (
+                "message_start",
+                json!({ "type": "message_start", "message": {} }),
+            ),
+            (
+                "error",
+                json!({ "type": "error", "error": { "type": "overloaded_error", "message": "Overloaded" } }),
+            ),
+        ]);
+
+        let (frames, _) = run(&text);
+        let raw: String = frames.iter().map(|frame| frame.data.clone()).collect();
+        assert!(raw.contains("Overloaded"));
+        assert!(
+            !raw.contains("[DONE]"),
+            "a stream that failed did not finish"
+        );
+    }
+}
