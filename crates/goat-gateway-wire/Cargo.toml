@@ -9,7 +9,7 @@ publish = false
 # This crate understands protocols. It must never learn to talk to the network
 # or to a database — that boundary is what keeps the loss-detection tests fast
 # enough that they actually get run. Adding reqwest/sqlx/tokio here is the
-# moment this product starts silently dropping things. See docs/design-product.md.
+# moment this product starts silently dropping things. See AGENTS.md.
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
