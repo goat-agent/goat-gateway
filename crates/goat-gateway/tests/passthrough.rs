@@ -304,6 +304,7 @@ async fn a_second_turn_goes_back_to_the_account_holding_the_cache() {
                     resets_at_ms: None,
                 }],
                 binding: None,
+                said: None,
             },
         )
         .unwrap();

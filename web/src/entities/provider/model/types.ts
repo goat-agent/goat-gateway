@@ -11,6 +11,7 @@ export type LimitWindow = {
 export type AccountLimits = {
   account: string;
   windows: LimitWindow[];
+  said: string | null;
   observed_at: number;
 };
 

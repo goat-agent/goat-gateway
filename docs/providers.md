@@ -36,9 +36,23 @@ happens when the two formats match.
 `key` is how an API key is presented: `bearer` puts it in `Authorization`, `x_api_key` puts
 it in `x-api-key`. Getting this wrong looks exactly like a bad key.
 
-`limits` is where quota comes from: `headers` reads it off responses the gateway is already
-making, `{ endpoint = { url = "…" } }` names a place to ask, `none` means this provider does
-not say.
+`limits` is where quota comes from. `headers` reads it off responses the gateway is already
+making. `none` means this provider does not say. `{ endpoint = { … } }` names a place to ask,
+and where the numbers are in the answer:
+
+```toml
+limits = { endpoint = { url = "https://api.example.com/usage", windows = [
+  { label = "weekly", used_percent = "/data/weekly/used", resets_at = "/data/weekly/reset_at" },
+  { label = "5h", scope = "large", used_percent = "/data/five_hour/used", resets_in_seconds = "/data/five_hour/left" },
+] } }
+```
+
+The pointers are JSON pointers into whatever the endpoint returns. A percentage may be given
+as 0–1 or 0–100; either is read correctly. A reset may be an absolute moment or seconds
+remaining. Declare the URL without any windows and the gateway will still ask, keep what came
+back, and show it on the overview so the pointers can be written from the real answer rather
+than guessed. Asking happens on the back of real traffic, at most once a minute per account,
+because these endpoints rate-limit aggressively and without a Retry-After.
 
 `price` is in micro-dollars per million tokens. Leave it out and requests to that model show
 no cost rather than a cost of zero — a model whose price we do not know is not free.
@@ -46,6 +60,16 @@ no cost rather than a cost of zero — a model whose price we do not know is not
 `thinking`, `max_tokens`, and `mid_conversation_system` are only read when a request has to
 be translated into this provider's format. A provider that is only ever passed through needs
 a model name and nothing else.
+
+## Formats
+
+Every provider is reached from every door. A request arriving in a format the provider already
+serves is passed through untouched; anything else is translated, and where there is no direct
+translator the gateway goes through Messages — a Responses request reaches a Chat-only coding
+plan as Responses to Messages to Chat, and the reply comes back the same way reversed.
+
+That means a new format costs two translators, to and from Messages, rather than one for every
+other format that exists.
 
 ## The built-in set
 

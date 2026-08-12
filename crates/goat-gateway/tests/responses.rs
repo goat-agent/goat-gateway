@@ -302,6 +302,7 @@ async fn a_second_turn_returns_to_the_account_that_minted_the_envelope() {
                     resets_at_ms: None,
                 }],
                 binding: None,
+                said: None,
             },
         )
         .unwrap();

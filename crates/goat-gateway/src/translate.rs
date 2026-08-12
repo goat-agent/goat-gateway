@@ -131,6 +131,7 @@ pub(crate) async fn run(incoming: Incoming, ready: Ready, hops: &'static [Hop]) 
         upstream.status().as_u16(),
         upstream.headers(),
     );
+    crate::quota::refresh_soon(&incoming.app, &ready.account, &ready.route.provider);
 
     let mut row = serve::opened(&incoming, &ready, None);
     row.byte_identical = Some(false);

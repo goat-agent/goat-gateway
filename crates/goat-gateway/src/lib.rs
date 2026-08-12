@@ -9,6 +9,7 @@ pub mod pool;
 pub mod pricing;
 pub mod probe;
 pub mod provider;
+pub mod quota;
 pub mod relay_path;
 pub mod responses;
 pub mod serve;
@@ -43,6 +44,7 @@ pub(crate) struct Inner {
     pub(crate) sessions: oauth::Sessions,
     pub(crate) announcer: events::Announcer,
     pub(crate) turns: turns::Turns,
+    pub(crate) asked: quota::Asked,
 }
 
 impl App {
@@ -56,6 +58,7 @@ impl App {
                 sessions: oauth::Sessions::default(),
                 announcer: events::Announcer::default(),
                 turns: turns::Turns::default(),
+                asked: quota::Asked::default(),
             }),
         }
     }

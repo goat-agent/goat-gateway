@@ -23,6 +23,8 @@ impl Window {
 pub struct Snapshot {
     pub windows: Vec<Window>,
     pub binding: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub said: Option<String>,
 }
 
 impl Snapshot {
@@ -43,6 +45,61 @@ impl Snapshot {
     pub fn soonest_reset(&self) -> Option<i64> {
         self.windows.iter().filter_map(|w| w.resets_at_ms).min()
     }
+}
+
+pub fn from_answer(
+    body: &serde_json::Value,
+    asked: &[crate::provider::WindowAt],
+    now_ms: i64,
+) -> Snapshot {
+    let number = |pointer: &Option<String>| {
+        pointer
+            .as_deref()
+            .and_then(|pointer| body.pointer(pointer))
+            .and_then(reading)
+    };
+
+    let windows = asked
+        .iter()
+        .filter_map(|want| {
+            let used = reading(body.pointer(&want.used_percent)?)?;
+            let resets_at_ms = number(&want.resets_at)
+                .map(|at| {
+                    if at > 1_000_000_000_000.0 {
+                        at
+                    } else {
+                        at * 1000.0
+                    }
+                })
+                .or_else(|| {
+                    number(&want.resets_in_seconds).map(|left| now_ms as f64 + left * 1000.0)
+                })
+                .map(|at| at as i64);
+            Some(Window {
+                label: want.label.clone(),
+                scope: want.scope.clone(),
+                used_percent: if used <= 1.0 { used * 100.0 } else { used },
+                resets_at_ms,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let said = windows.is_empty().then(|| {
+        let text = body.to_string();
+        text.chars().take(2000).collect()
+    });
+
+    Snapshot {
+        windows,
+        binding: None,
+        said,
+    }
+}
+
+fn reading(value: &serde_json::Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|text| parse_utilization(text)))
 }
 
 pub fn parse(headers: &HeaderMap, now_ms: i64) -> Snapshot {
@@ -135,7 +192,11 @@ pub fn parse(headers: &HeaderMap, now_ms: i64) -> Snapshot {
         });
 
     windows.sort_by(|a, b| a.label.cmp(&b.label));
-    Snapshot { windows, binding }
+    Snapshot {
+        windows,
+        binding,
+        said: None,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

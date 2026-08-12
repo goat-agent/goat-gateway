@@ -112,7 +112,28 @@ pub enum Key {
 pub enum Limits {
     None,
     Headers,
-    Endpoint { url: String },
+    Endpoint(Asked),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Asked {
+    pub url: String,
+    #[serde(default)]
+    pub windows: Vec<WindowAt>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowAt {
+    pub label: String,
+    #[serde(default)]
+    pub scope: Option<String>,
+    pub used_percent: String,
+    #[serde(default)]
+    pub resets_at: Option<String>,
+    #[serde(default)]
+    pub resets_in_seconds: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

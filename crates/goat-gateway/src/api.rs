@@ -214,6 +214,7 @@ async fn overview(State(app): State<App>, Query(window): Query<Window>) -> Respo
                 seen(&account.name).map(|(name, snapshot, observed_at)| json!({
                     "account": name,
                     "windows": snapshot.windows,
+                    "said": snapshot.said,
                     "observed_at": observed_at,
                 }))
             }).collect::<Vec<_>>(),

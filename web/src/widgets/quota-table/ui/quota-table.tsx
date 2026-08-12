@@ -1,5 +1,5 @@
 import { Body, Cell, Count, Head, Nothing, Row, Table } from "@/shared/ui";
-import type { ProviderHealth } from "@/entities/provider";
+import type { AccountLimits, ProviderHealth } from "@/entities/provider";
 import { ago, share, within } from "@/shared/lib/format";
 
 export function QuotaTable({ providers, now }: { providers: ProviderHealth[]; now: number }) {
@@ -9,10 +9,17 @@ export function QuotaTable({ providers, now }: { providers: ProviderHealth[]; no
     ),
   );
 
+  const unread = providers.flatMap((provider) =>
+    provider.limits.filter((limit) => limit.windows.length === 0 && limit.said),
+  );
   const quiet = providers.filter((provider) => !provider.reports_limits);
   const unseen = providers.filter(
     (provider) => provider.reports_limits && provider.limits.length === 0,
   );
+
+  if (rows.length === 0 && unread.length > 0) {
+    return <Undeclared limits={unread} />;
+  }
 
   if (rows.length === 0) {
     return (
@@ -66,6 +73,8 @@ export function QuotaTable({ providers, now }: { providers: ProviderHealth[]; no
         </Body>
       </Table>
 
+      {unread.length > 0 ? <Undeclared limits={unread} /> : null}
+
       {quiet.length > 0 || unseen.length > 0 ? (
         <p className="m-0 border-t border-line-subtle px-3 py-2 text-micro text-ink-muted">
           {[
@@ -77,6 +86,25 @@ export function QuotaTable({ providers, now }: { providers: ProviderHealth[]; no
         </p>
       ) : null}
     </>
+  );
+}
+
+function Undeclared({ limits }: { limits: AccountLimits[] }) {
+  return (
+    <div className="flex flex-col gap-2 border-t border-line-subtle p-3">
+      <p className="m-0 text-micro text-ink-muted">
+        These providers answered, but this gateway has not been told where the numbers are in what
+        they said. Add pointers under the provider's limits in config.toml.
+      </p>
+      {limits.map((limit) => (
+        <div key={limit.account} className="flex flex-col gap-1">
+          <span className="text-micro text-ink-secondary">{limit.account}</span>
+          <pre className="m-0 overflow-x-auto rounded-sm bg-base p-2 font-mono text-code text-ink-secondary">
+            {limit.said}
+          </pre>
+        </div>
+      ))}
+    </div>
   );
 }
 

@@ -173,6 +173,7 @@ mod tests {
                 resets_at_ms: None,
             }],
             binding: None,
+            said: None,
         }
     }
 
@@ -201,6 +202,7 @@ mod tests {
                         },
                     ],
                     binding: None,
+                    said: None,
                 },
             )
             .unwrap();
