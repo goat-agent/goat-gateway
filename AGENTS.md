@@ -104,6 +104,12 @@ someone else's terminal.
 - New behaviour needs a test that would have failed before it. A bug fix needs the test first.
 - Do not test values that are statically defined, and do not add tests for logic you removed.
 
+## Releasing
+
+Tag a commit `v0.1.0`-style and push the tag. `release.yml` builds the image, pushes it to
+`ghcr.io/goat-agent/goat-gateway` under the semver tags and `latest`, and opens a GitHub
+release whose notes are generated from the merged pull requests.
+
 ## Commits
 
 The subject is a sentence saying what changed, in the product's terms, not the code's:
