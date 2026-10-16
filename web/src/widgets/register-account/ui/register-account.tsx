@@ -1,5 +1,6 @@
-import { useState } from "react";
-import { Button, Dialog } from "@/shared/ui";
+import { useCallback, useState } from "react";
+import { LogIn } from "lucide-react";
+import { Button, Dialog, toast } from "@/shared/ui";
 import { useResource } from "@/shared/api";
 import type { SignInProvider } from "@/entities/provider";
 import { KeyForm } from "@/features/add-account";
@@ -31,14 +32,34 @@ export function RegisterAccount({
     onClose();
   };
 
+  const added = useCallback(() => {
+    toast(`Added ${name.trim()}`, {
+      says: `Registered as a ${provider} account.`,
+      tone: "good",
+      id: `added/${name.trim()}`,
+    });
+    setName("");
+    setSigningIn(false);
+    onAdded();
+  }, [name, provider, onAdded]);
+
   return (
-    <Dialog open={open} onClose={close} title="Add an account">
+    <Dialog
+      open={open}
+      onClose={close}
+      title={signingIn ? "Sign in to a subscription" : "Add an account"}
+      description={
+        signingIn
+          ? undefined
+          : "Requests go to whichever registered account can serve them."
+      }
+    >
       {signingIn ? (
         <SignIn
           provider={provider}
           name={name}
           offered={offered}
-          onDone={onAdded}
+          onDone={added}
           onCancel={() => setSigningIn(false)}
         />
       ) : (
@@ -48,22 +69,23 @@ export function RegisterAccount({
           onProvider={setProvider}
           name={name}
           onName={setName}
-          onAdded={onAdded}
+          onAdded={added}
         >
           <span className="flex gap-2">
+            <Button size="medium" onClick={close}>
+              Cancel
+            </Button>
             {offered ? (
               <Button
-                type="button"
-                tone="quiet"
+                tone="ghost"
+                size="medium"
                 disabled={name.trim() === ""}
                 onClick={() => setSigningIn(true)}
               >
+                <LogIn strokeWidth={1.75} />
                 Sign in instead
               </Button>
             ) : null}
-            <Button type="button" tone="quiet" onClick={close}>
-              Cancel
-            </Button>
           </span>
         </KeyForm>
       )}

@@ -1,11 +1,18 @@
 import { useCallback, useState } from "react";
-import { Button, Input, Nothing, Page, Panel, PanelHead, Select } from "@/shared/ui";
+import { FilterX, Rows3, Search } from "lucide-react";
+import { Button, Input, Nothing, Page, Select } from "@/shared/ui";
 import { query, useHappenings, useResource } from "@/shared/api";
+import { useCommand } from "@/shared/model/commands";
 import { STATUSES, type Request } from "@/entities/request";
 import { RequestTable } from "@/widgets/request-table";
-import { useFilter } from "@/features/filter-requests";
+import { FilterChips, useFilter } from "@/features/filter-requests";
 
 const FIELDS = ["search", "status", "provider", "account", "model", "person", "client"] as const;
+
+const STATUS_CHOICES = [
+  { value: "", label: "Any status" },
+  ...STATUSES.map((status) => ({ value: status, label: status.replace("_", " ") })),
+];
 
 export function RequestsPage() {
   const { held, set, clear } = useFilter(FIELDS);
@@ -27,12 +34,27 @@ export function RequestsPage() {
 
   const requests = page.data?.requests ?? [];
   const narrowed = Object.keys(held).length > 0;
+  const elsewhere = Object.fromEntries(
+    Object.entries(held).filter(([field]) => field !== "search" && field !== "status"),
+  );
+
+  const clearAll = () => {
+    setTyped("");
+    clear();
+  };
+
+  useCommand(
+    { id: "requests/clear", label: "Clear the request filters", group: "Requests", icon: FilterX, perform: clearAll },
+    narrowed,
+  );
 
   return (
     <Page
       title="Requests"
-      note={page.error}
-      aside={
+      note={requests.length > 0 ? `newest first, ${requests.length} shown` : undefined}
+      refused={page.error}
+      bleed
+      toolbar={
         <>
           <form
             onSubmit={(event) => {
@@ -41,56 +63,49 @@ export function RequestsPage() {
             }}
           >
             <Input
-              className="w-56"
-              placeholder="model, account, request id…"
+              lead={<Search strokeWidth={1.75} />}
+              className="h-7 w-64"
+              placeholder="Model, account, request id…"
+              aria-label="Search requests"
               value={typed}
               onChange={(event) => setTyped(event.target.value)}
             />
           </form>
           <Select
+            label="Status"
             className="w-32"
             value={held["status"] ?? ""}
-            onChange={(event) => set("status", event.target.value)}
-          >
-            <option value="">any status</option>
-            {STATUSES.map((status) => (
-              <option key={status} value={status}>
-                {status.replace("_", " ")}
-              </option>
-            ))}
-          </Select>
+            choices={STATUS_CHOICES}
+            onChange={(value) => set("status", value)}
+          />
+          <FilterChips held={elsewhere} onDrop={(field) => set(field, "")} />
+          {narrowed ? (
+            <Button tone="ghost" size="small" className="ml-auto" onClick={clearAll}>
+              Clear filters
+            </Button>
+          ) : null}
         </>
       }
     >
-      <Panel>
-        <PanelHead
-          title="Newest first"
-          note={requests.length > 0 ? `${requests.length} shown` : undefined}
+      {requests.length === 0 ? (
+        <Nothing
+          icon={Rows3}
+          says={
+            narrowed
+              ? "Nothing matches these filters."
+              : "No request has reached this gateway yet. Point a client at it and the first one lands here."
+          }
+          offers={
+            narrowed ? (
+              <Button size="medium" onClick={clearAll}>
+                Clear filters
+              </Button>
+            ) : undefined
+          }
         />
-        {requests.length === 0 ? (
-          <Nothing
-            says={
-              narrowed
-                ? "Nothing matches these filters."
-                : "No request has reached this gateway yet. Point a client at it and the first one lands here."
-            }
-            offers={
-              narrowed ? (
-                <Button
-                  onClick={() => {
-                    setTyped("");
-                    clear();
-                  }}
-                >
-                  Clear filters
-                </Button>
-              ) : undefined
-            }
-          />
-        ) : (
-          <RequestTable requests={requests} now={Date.now()} />
-        )}
-      </Panel>
+      ) : (
+        <RequestTable requests={requests} now={Date.now()} />
+      )}
     </Page>
   );
 }

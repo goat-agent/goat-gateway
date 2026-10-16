@@ -5,7 +5,7 @@ export function Panel({ className, ...props }: ComponentProps<"section">) {
   return (
     <section
       data-slot="panel"
-      className={cn("rounded-md border border-line-subtle bg-panel", className)}
+      className={cn("min-w-0 overflow-hidden rounded-lg hairline border-line bg-panel", className)}
       {...props}
     />
   );
@@ -23,13 +23,36 @@ export function PanelHead({
   return (
     <header
       data-slot="panel-head"
-      className="flex min-h-11 items-center justify-between gap-3 border-b border-line-subtle px-3"
+      className="flex min-h-11 flex-wrap items-center justify-between gap-x-3 gap-y-1 px-4 py-1.5 select-none"
     >
-      <div className="flex items-baseline gap-2">
-        <h2 className="text-small font-semibold text-ink">{title}</h2>
-        {note ? <span className="text-micro text-ink-muted">{note}</span> : null}
+      <div className="flex min-w-0 items-baseline gap-2">
+        <h2 className="m-0 shrink-0 text-small font-medium text-ink-title">{title}</h2>
+        {note ? <span className="truncate text-mini text-ink-secondary">{note}</span> : null}
       </div>
       {children ? <div className="flex items-center gap-1.5">{children}</div> : null}
     </header>
+  );
+}
+
+export function Group({
+  title,
+  count,
+  children,
+}: {
+  title: ReactNode;
+  count?: number;
+  children?: ReactNode;
+}) {
+  return (
+    <div
+      data-slot="group"
+      className="flex h-[var(--group-height)] items-center gap-2 hairline-b border-line-subtle bg-shade px-5 select-none"
+    >
+      <span className="text-small font-medium text-ink-title">{title}</span>
+      {count !== undefined ? (
+        <span className="numeric text-small text-ink-secondary">{count}</span>
+      ) : null}
+      {children ? <div className="ml-auto flex items-center gap-1.5">{children}</div> : null}
+    </div>
   );
 }

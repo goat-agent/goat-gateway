@@ -3,15 +3,16 @@ import type { ComponentProps } from "react";
 import { cn } from "@/shared/lib/cn";
 
 const badge = cva(
-  "inline-flex h-5 items-center gap-1 rounded-sm px-1.5 text-micro font-medium whitespace-nowrap",
+  "inline-flex h-5 shrink-0 items-center gap-1.5 rounded-full px-2 text-mini font-medium whitespace-nowrap select-none [&_svg]:size-3",
   {
     variants: {
       tone: {
-        neutral: "bg-raised text-ink-secondary",
-        good: "bg-[color-mix(in_srgb,var(--good)_18%,transparent)] text-[var(--good)]",
-        warning: "bg-[color-mix(in_srgb,var(--warning)_18%,transparent)] text-[var(--warning)]",
-        serious: "bg-[color-mix(in_srgb,var(--serious)_18%,transparent)] text-[var(--serious)]",
-        critical: "bg-[color-mix(in_srgb,var(--critical)_18%,transparent)] text-[var(--critical)]",
+        neutral: "hairline border-line text-ink-secondary",
+        good: "bg-good-tint text-good-text",
+        warning: "bg-warning-tint text-warning-text",
+        serious: "bg-serious-tint text-serious-text",
+        critical: "bg-critical-tint text-critical-text",
+        info: "bg-info-tint text-info-text",
       },
     },
     defaultVariants: { tone: "neutral" },
@@ -19,8 +20,36 @@ const badge = cva(
 );
 
 export type Tone = NonNullable<VariantProps<typeof badge>["tone"]>;
-export type BadgeProps = ComponentProps<"span"> & VariantProps<typeof badge>;
+export type BadgeProps = ComponentProps<"span"> & VariantProps<typeof badge> & { dot?: boolean };
 
-export function Badge({ className, tone, ...props }: BadgeProps) {
-  return <span data-slot="badge" className={cn(badge({ tone }), className)} {...props} />;
+export function Badge({ className, tone, dot = false, children, ...props }: BadgeProps) {
+  return (
+    <span data-slot="badge" className={cn(badge({ tone }), className)} {...props}>
+      {dot ? <span className="size-1.5 shrink-0 rounded-full bg-current" /> : null}
+      {children}
+    </span>
+  );
+}
+
+export function Pill({
+  className,
+  swatch,
+  children,
+  ...props
+}: ComponentProps<"span"> & { swatch?: string }) {
+  return (
+    <span
+      data-slot="pill"
+      className={cn(
+        "inline-flex h-6 shrink-0 items-center gap-1.5 rounded-full hairline border-line px-2.5 text-mini font-medium whitespace-nowrap text-ink select-none",
+        className,
+      )}
+      {...props}
+    >
+      {swatch ? (
+        <span className="size-2 shrink-0 rounded-full" style={{ background: swatch }} />
+      ) : null}
+      {children}
+    </span>
+  );
 }

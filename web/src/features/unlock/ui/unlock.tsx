@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Button, Field, Input } from "@/shared/ui";
+import { Button, Field, Input, Mark } from "@/shared/ui";
 import { tell } from "@/shared/api";
 import { useSession } from "@/shared/model/session";
 
@@ -10,9 +10,9 @@ export function Unlock() {
   const [trying, setTrying] = useState(false);
 
   return (
-    <main className="flex h-full items-center justify-center bg-base p-6">
+    <main className="flex h-full items-start justify-center bg-base px-6 pt-[18vh]">
       <form
-        className="flex w-[22rem] flex-col gap-4 rounded-md border border-line-subtle bg-panel p-5"
+        className="flex w-[min(22rem,100%)] flex-col gap-6"
         onSubmit={(event) => {
           event.preventDefault();
           setTrying(true);
@@ -23,28 +23,40 @@ export function Unlock() {
             .finally(() => setTrying(false));
         }}
       >
-        <div className="flex flex-col gap-1">
-          <h1 className="m-0 text-heading font-semibold tracking-tight">goat gateway</h1>
-          <p className="m-0 text-small text-ink-secondary">
-            The admin key was printed once, the first time this gateway started.
-          </p>
+        <div className="flex flex-col items-center gap-4 text-center">
+          <Mark className="size-9 rounded-[10px] text-regular" />
+          <div className="flex flex-col gap-1.5">
+            <h1 className="display m-0 text-headline font-semibold text-ink-title">
+              Open goat gateway
+            </h1>
+            <p className="m-0 text-small text-ink-secondary">
+              The admin key was printed once, the first time this gateway started.
+            </p>
+          </div>
         </div>
 
-        <Field label="Admin key">
-          <Input
-            autoFocus
-            type="password"
-            value={key}
-            placeholder="gwa_…"
-            onChange={(event) => setKey(event.target.value)}
-          />
-        </Field>
+        <div className="flex flex-col gap-3 rounded-xl hairline border-line bg-panel p-5 shadow-medium">
+          <Field label="Admin key" refused={refused}>
+            <Input
+              autoFocus
+              type="password"
+              value={key}
+              placeholder="gwa_…"
+              aria-invalid={refused ? true : undefined}
+              onChange={(event) => setKey(event.target.value)}
+            />
+          </Field>
 
-        {refused ? <p className="m-0 text-small text-[var(--critical)]">{refused}</p> : null}
-
-        <Button tone="primary" type="submit" disabled={trying || key.trim() === ""}>
-          {trying ? "Checking…" : "Open"}
-        </Button>
+          <Button
+            tone="primary"
+            size="medium"
+            type="submit"
+            className="w-full"
+            disabled={trying || key.trim() === ""}
+          >
+            {trying ? "Checking…" : "Open"}
+          </Button>
+        </div>
       </form>
     </main>
   );

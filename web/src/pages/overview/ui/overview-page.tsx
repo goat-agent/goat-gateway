@@ -1,8 +1,26 @@
 import { useCallback, useState } from "react";
 import { Link } from "react-router-dom";
-import { Body, Button, Cell, Count, Foot, Head, Nothing, Page, Panel, PanelHead, Row, Select, Table, Tile } from "@/shared/ui";
+import { PlugZap } from "lucide-react";
+import {
+  Body,
+  ButtonLink,
+  Cell,
+  Count,
+  Foot,
+  Head,
+  Nothing,
+  Page,
+  Panel,
+  PanelHead,
+  Row,
+  Select,
+  Table,
+  Tile,
+  Tiles,
+  rowHover,
+} from "@/shared/ui";
 import { query, useHappenings, useResource } from "@/shared/api";
-import { SPANS, DAY, spanOf, type Span } from "@/shared/config/spans";
+import { DAY, SPAN_CHOICES, spanOf, type Span } from "@/shared/config/spans";
 import { seriesColor } from "@/shared/model/series";
 import { count, duration, money, percent, tokens } from "@/shared/lib/format";
 import { METRICS, type MetricName, type UsageReport } from "@/entities/usage";
@@ -49,11 +67,12 @@ export function OverviewPage() {
       <Page title="Overview">
         <Panel>
           <Nothing
+            icon={PlugZap}
             says="No provider account is registered, so there is nothing for this gateway to serve requests with."
             offers={
-              <Link to="/accounts">
-                <Button tone="primary">Add an account</Button>
-              </Link>
+              <ButtonLink to="/accounts" tone="primary" size="medium">
+                Add an account
+              </ButtonLink>
             }
           />
         </Panel>
@@ -65,21 +84,18 @@ export function OverviewPage() {
     <Page
       title="Overview"
       note={seen ? `prices as of ${seen.pricing_as_of}` : undefined}
+      refused={overview.error ?? usage.error}
       aside={
         <Select
-          className="w-40"
+          label="Window"
+          className="w-36"
           value={String(span.ms)}
-          onChange={(event) => setSpan(spanOf(event.target.value))}
-        >
-          {SPANS.map((entry) => (
-            <option key={entry.ms} value={entry.ms}>
-              {entry.label}
-            </option>
-          ))}
-        </Select>
+          choices={SPAN_CHOICES}
+          onChange={(value) => setSpan(spanOf(value))}
+        />
       }
     >
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+      <Tiles>
         <Tile
           label="In flight"
           value={count(seen?.totals.in_flight)}
@@ -114,7 +130,7 @@ export function OverviewPage() {
           note={seen?.attention[0]?.account ?? "every account is usable"}
           tone={seen && seen.attention.length > 0 ? "warning" : undefined}
         />
-      </div>
+      </Tiles>
 
       <Panel>
         <PanelHead title="Traffic" note={`by provider, ${span.label.toLowerCase()}`}>
@@ -125,10 +141,11 @@ export function OverviewPage() {
             buckets={report.series}
             metric={shown}
             bucketMs={report.bucket_ms}
+            windowMs={span.ms}
             space="provider"
           />
         ) : (
-          <div className="h-[188px]" />
+          <div className="h-[216px]" />
         )}
       </Panel>
 
@@ -149,21 +166,21 @@ export function OverviewPage() {
             </Head>
             <Body>
               {report.breakdown.map((slice) => (
-                <Row key={slice.key}>
+                <Row key={slice.key} className={rowHover}>
                   <td>
                     <Link
                       to={`/usage?provider=${encodeURIComponent(slice.key)}`}
-                      className="flex items-center gap-2 text-ink no-underline hover:underline"
+                      className="flex items-center gap-2.5 font-medium text-ink hover:text-ink-title"
                     >
                       <span
-                        className="size-2 shrink-0 rounded-[2px]"
+                        className="size-2.5 shrink-0 rounded-[3px]"
                         style={{ background: seriesColor("provider", slice.key) }}
                       />
                       {labelOf(seen, slice.key)}
                     </Link>
                   </td>
                   <Cell>{count(slice.totals.requests)}</Cell>
-                  <Cell className={slice.totals.errors > 0 ? "text-[var(--critical)]" : undefined}>
+                  <Cell className={slice.totals.errors > 0 ? "text-critical-text" : undefined}>
                     {count(slice.totals.errors)}
                   </Cell>
                   <Cell>{tokens(slice.totals.usage.input_tokens)}</Cell>

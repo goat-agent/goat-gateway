@@ -1,5 +1,7 @@
-import { Button } from "@/shared/ui";
+import { SegmentedControl } from "@/shared/ui";
 import { METRICS, METRIC_NAMES, type MetricName } from "@/entities/usage";
+
+const CHOICES = METRIC_NAMES.map((name) => ({ value: name, label: METRICS[name].label }));
 
 export function MetricPicker({
   chosen,
@@ -8,18 +10,5 @@ export function MetricPicker({
   chosen: MetricName;
   onPick: (name: MetricName) => void;
 }) {
-  return (
-    <>
-      {METRIC_NAMES.map((name) => (
-        <Button
-          key={name}
-          size="small"
-          tone={name === chosen ? "plain" : "quiet"}
-          onClick={() => onPick(name)}
-        >
-          {METRICS[name].label}
-        </Button>
-      ))}
-    </>
-  );
+  return <SegmentedControl label="Metric" value={chosen} choices={CHOICES} onChange={onPick} />;
 }

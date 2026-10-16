@@ -20,9 +20,11 @@ export function StateBadge({
 }) {
   const said = SAID[state];
   return (
-    <Badge tone={said.tone}>
+    <Badge dot tone={said.tone}>
       {said.text}
-      {state === "rate_limited" && until ? ` · ${within(until, now)}` : ""}
+      {state === "rate_limited" && until ? (
+        <span className="numeric opacity-80">· {within(until, now)}</span>
+      ) : null}
     </Badge>
   );
 }

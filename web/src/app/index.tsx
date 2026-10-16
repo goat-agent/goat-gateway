@@ -5,6 +5,7 @@ import { Unlock } from "@/features/unlock";
 import { useLive } from "@/entities/request";
 import { useHappenings } from "@/shared/api";
 import { useSession } from "@/shared/model/session";
+import { ConfirmationHost, ToastHost, TooltipProvider } from "@/shared/ui";
 import { AppRoutes } from "./routes";
 
 export function App() {
@@ -22,13 +23,20 @@ export function App() {
     ),
   );
 
-  if (locked) return <Unlock />;
-
   return (
-    <BrowserRouter>
-      <AppShell>
-        <AppRoutes />
-      </AppShell>
-    </BrowserRouter>
+    <ToastHost>
+      <TooltipProvider>
+        {locked ? (
+          <Unlock />
+        ) : (
+          <BrowserRouter>
+            <AppShell>
+              <AppRoutes />
+            </AppShell>
+          </BrowserRouter>
+        )}
+        <ConfirmationHost />
+      </TooltipProvider>
+    </ToastHost>
   );
 }

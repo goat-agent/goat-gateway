@@ -7,6 +7,8 @@ export const SPANS = [
   { label: "Last 30 days", ms: 2_592_000_000, bucket: 86_400_000 },
 ] as const satisfies readonly Span[];
 
+export const SPAN_CHOICES = SPANS.map((span) => ({ value: String(span.ms), label: span.label }));
+
 export const DAY = SPANS[1];
 export const WEEK = SPANS[2];
 

@@ -21,29 +21,28 @@ export function UsageBars({
 
   if (rows.length === 0) {
     return (
-      <p className="m-0 px-3 py-8 text-center text-small text-ink-muted">
+      <p className="m-0 px-4 py-10 text-center text-small text-ink-secondary">
         Nothing here reports {metric.label.toLowerCase()}.
       </p>
     );
   }
 
   return (
-    <ul className="m-0 flex list-none flex-col gap-2 p-3">
+    <ul className="m-0 flex list-none flex-col gap-0.5 px-2 pb-2">
       {rows.map((row) => (
         <li key={row.key}>
           <button
             type="button"
             disabled={!onPick}
+            title={onPick ? `Only show ${row.key || "unattributed"}` : undefined}
             onClick={() => onPick?.(row.key)}
-            className="group flex w-full flex-col gap-1 text-left disabled:cursor-default"
+            className="hover-fade flex w-full flex-col gap-1.5 rounded-md px-2 py-2 text-left enabled:hover:bg-panel-hover"
           >
-            <span className="flex items-baseline justify-between gap-3 text-small">
-              <span className="truncate text-ink group-enabled:group-hover:underline">
-                {row.key || "unattributed"}
-              </span>
+            <span className="flex w-full items-baseline justify-between gap-3 text-small">
+              <span className="min-w-0 truncate text-ink">{row.key || "unattributed"}</span>
               <span className="numeric shrink-0 text-ink-secondary">{metric.show(row.value)}</span>
             </span>
-            <span className="block h-1.5 w-full rounded-full bg-raised">
+            <span className="block h-1 w-full rounded-full bg-line-subtle">
               <span
                 className="block h-full rounded-full"
                 style={{
