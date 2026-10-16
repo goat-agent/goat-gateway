@@ -47,6 +47,17 @@ async fn messages(State(seen): State<Seen>, headers: HeaderMap, body: Bytes) -> 
     record(&seen, "/v1/messages", headers, body).await
 }
 
+async fn count_tokens(State(seen): State<Seen>, headers: HeaderMap, body: Bytes) -> Response {
+    *seen.path.lock().unwrap() = Some("/v1/messages/count_tokens".to_owned());
+    *seen.body.lock().unwrap() = Some(body);
+    *seen.headers.lock().unwrap() = Some(headers);
+    Response::builder()
+        .status(200)
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"input_tokens":12}"#))
+        .unwrap()
+}
+
 async fn serve(router: Router) -> SocketAddr {
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
@@ -99,6 +110,7 @@ async fn harness(accounts: &[(&str, &str)]) -> Harness {
             .route("/v1/responses", post(responses))
             .route("/v1/chat/completions", post(chat))
             .route("/v1/messages", post(messages))
+            .route("/v1/messages/count_tokens", post(count_tokens))
             .with_state(seen.clone()),
     )
     .await;
@@ -534,4 +546,426 @@ async fn a_codex_client_reaches_a_coding_plan_two_formats_away() {
     let body = response.text().await.unwrap();
     assert!(body.contains("response.created"), "{body}");
     assert!(body.contains("response.completed"), "{body}");
+}
+
+#[tokio::test]
+async fn a_translated_request_is_in_flight_while_the_provider_thinks() {
+    let release = Arc::new(tokio::sync::Notify::new());
+    let held = release.clone();
+    let upstream = serve(Router::new().route(
+        "/v1/responses",
+        post(move || {
+            let held = held.clone();
+            async move {
+                held.notified().await;
+                Response::builder()
+                    .status(200)
+                    .header("content-type", "text/event-stream")
+                    .body(Body::from(
+                        "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{}}\n\n",
+                    ))
+                    .unwrap()
+            }
+        }),
+    ))
+    .await;
+
+    let store = Store::in_memory(&[7u8; 32]).unwrap();
+    store
+        .add_account("work", "openai", "api_key", b"sk")
+        .unwrap();
+    let user = store.add_user("jmo").unwrap();
+    let key = store.issue_key(&user.id, "test").unwrap().secret;
+    let catalog = Catalog::builtin().with_base_url("openai", &format!("http://{upstream}"));
+    let gateway = serve(App::new(store.clone(), [1u8; 32], catalog).router()).await;
+
+    let sending = tokio::spawn(async move {
+        reqwest::Client::new()
+            .post(format!("http://{gateway}/v1/messages"))
+            .header("x-api-key", &key)
+            .json(&json!({ "model": "gpt-5", "max_tokens": 8, "stream": true, "messages": [] }))
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap()
+    });
+
+    let mut seen = None;
+    for _ in 0..50 {
+        seen = store.recent_requests(1).unwrap().into_iter().next();
+        if seen.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let row = seen.expect("in flight is a real number only if the row exists before the answer");
+    assert_eq!(row.status, "in_flight");
+    assert!(row.translated);
+
+    release.notify_one();
+    sending.await.unwrap();
+}
+
+#[tokio::test]
+async fn the_paths_clients_build_from_a_base_url_all_arrive() {
+    let harness = harness(&[("personal", "anthropic")]).await;
+    for path in ["/messages", "/v1/messages", "/v1/v1/messages"] {
+        *harness.seen.path.lock().unwrap() = None;
+        let (status, body) = harness
+            .post(
+                path,
+                json!({ "model": "claude-sonnet-5", "max_tokens": 8, "messages": [] }),
+            )
+            .await;
+        assert_eq!(status, 200, "{path}: {body}");
+        assert_eq!(harness.reached().as_deref(), Some("/v1/messages"), "{path}");
+    }
+}
+
+#[tokio::test]
+async fn a_client_is_told_which_models_it_can_reach() {
+    let harness = harness(&[("personal", "anthropic")]).await;
+    let listed: Value = reqwest::Client::new()
+        .get(format!("http://{}/v1/models", harness.gateway))
+        .header("x-api-key", &harness.key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let ids: Vec<&str> = listed["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|model| model["id"].as_str())
+        .collect();
+    assert!(ids.contains(&"claude-sonnet-5"), "{ids:?}");
+    assert!(
+        !ids.contains(&"glm-4.7"),
+        "a model no registered account can serve is not on offer: {ids:?}"
+    );
+    assert_eq!(listed["object"], "list");
+    assert_eq!(listed["has_more"], false);
+    assert_eq!(listed["data"][0]["type"], "model");
+    assert_eq!(listed["data"][0]["object"], "model");
+}
+
+#[tokio::test]
+async fn counting_tokens_asks_the_provider_that_would_serve_the_message() {
+    let harness = harness(&[("personal", "anthropic")]).await;
+    let (status, body) = harness
+        .post(
+            "/v1/messages/count_tokens",
+            json!({ "model": "claude-sonnet-5", "messages": [{ "role": "user", "content": "hi" }] }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, r#"{"input_tokens":12}"#);
+    assert_eq!(
+        harness.reached().as_deref(),
+        Some("/v1/messages/count_tokens")
+    );
+    assert_eq!(harness.credential().as_deref(), Some("key-personal"));
+}
+
+#[tokio::test]
+async fn counting_tokens_for_a_model_served_in_another_format_says_so() {
+    let harness = harness(&[("work", "openai")]).await;
+    let (status, body) = harness
+        .post(
+            "/v1/messages/count_tokens",
+            json!({ "model": "gpt-5", "messages": [] }),
+        )
+        .await;
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("Messages"), "{body}");
+    assert_eq!(harness.reached(), None, "nothing should be sent anywhere");
+}
+
+#[tokio::test]
+async fn a_client_checking_whether_the_gateway_is_up_is_answered() {
+    let harness = harness(&[]).await;
+    let status = reqwest::Client::new()
+        .head(format!("http://{}/api/hello", harness.gateway))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(status, 200);
+}
+
+#[tokio::test]
+async fn claude_code_can_be_served_by_a_chatgpt_plan() {
+    const CODEX_SSE: &str = concat!(
+        "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}\n\n",
+        "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\",\"id\":\"msg_1\"}}\n\n",
+        "event: response.content_part.added\ndata: {\"type\":\"response.content_part.added\",\"part\":{\"type\":\"output_text\",\"text\":\"\"}}\n\n",
+        "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello from Codex\"}\n\n",
+        "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"id\":\"msg_1\"}}\n\n",
+        "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":12,\"output_tokens\":4}}}\n\n",
+    );
+    let sent = Arc::new(Mutex::new(None::<Value>));
+    let kept = sent.clone();
+    let upstream = serve(Router::new().route(
+        "/backend-api/codex/responses",
+        post(move |body: Bytes| {
+            let kept = kept.clone();
+            async move {
+                *kept.lock().unwrap() = serde_json::from_slice(&body).ok();
+                Response::builder()
+                    .status(200)
+                    .header("content-type", "text/event-stream")
+                    .body(Body::from(CODEX_SSE))
+                    .unwrap()
+            }
+        }),
+    ))
+    .await;
+
+    let store = Store::in_memory(&[7u8; 32]).unwrap();
+    let mino = store.add_user("mino").unwrap();
+    let plan = goat_gateway::oauth::Stored {
+        access: "at".into(),
+        refresh: None,
+        expires_at: None,
+        account_id: Some("acct_1".into()),
+        client_id: None,
+    };
+    store
+        .add_account("ChatGPT Pro", "chatgpt", "oauth", &plan.to_bytes())
+        .unwrap();
+    store.set_owner("ChatGPT Pro", Some(&mino.id)).unwrap();
+    let key = store.issue_key(&mino.id, "Claude Code").unwrap().secret;
+    let catalog = Catalog::builtin().with_base_url("chatgpt", &format!("http://{upstream}"));
+    let gateway = serve(App::new(store.clone(), [1u8; 32], catalog).router()).await;
+
+    let answer = reqwest::Client::new()
+        .post(format!("http://{gateway}/v1/messages"))
+        .header("x-api-key", &key)
+        .json(&json!({
+            "model": "gpt-5-codex",
+            "max_tokens": 1024,
+            "stream": true,
+            "system": [{ "type": "text", "text": "You are terse." }],
+            "messages": [{ "role": "user", "content": "hi" }],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(answer.status(), 200);
+    let text = answer.text().await.unwrap();
+    assert!(text.contains("message_start"), "{text}");
+    assert!(text.contains("Hello from Codex"), "{text}");
+    assert!(text.contains("message_stop"), "{text}");
+
+    let body = sent.lock().unwrap().clone().unwrap();
+    assert_eq!(body["instructions"], "You are terse.");
+    assert_eq!(body["store"], false);
+    assert_eq!(body["stream"], true);
+    assert!(
+        body.get("max_output_tokens").is_none(),
+        "the codex backend refuses max_output_tokens: {body}"
+    );
+
+    let row = &store.recent_requests(1).unwrap()[0];
+    assert!(row.translated);
+    assert_eq!(row.egress, "responses");
+    let evidence = row.evidence.clone().unwrap().to_string();
+    assert!(
+        evidence.contains("/max_output_tokens"),
+        "what the provider refused is written down: {evidence}"
+    );
+}
+
+#[tokio::test]
+async fn a_quiet_translated_stream_keeps_claude_code_from_giving_up() {
+    let upstream = serve(Router::new().route(
+        "/coding/v1/chat/completions",
+        post(|| async {
+            let pieces = async_stream::stream! {
+                yield Ok::<_, std::io::Error>(Bytes::from_static(
+                    b"data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"thinking it over\"}}]}\n\n",
+                ));
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                yield Ok(Bytes::from_static(
+                    b"data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                ));
+            };
+            Response::builder()
+                .status(200)
+                .header("content-type", "text/event-stream")
+                .body(Body::from_stream(pieces))
+                .unwrap()
+        }),
+    ))
+    .await;
+
+    let store = Store::in_memory(&[7u8; 32]).unwrap();
+    store
+        .add_account("plan", "kimi", "api_key", b"sk-kimi")
+        .unwrap();
+    let user = store.add_user("mino").unwrap();
+    let key = store.issue_key(&user.id, "Claude Code").unwrap().secret;
+    let catalog = Catalog::builtin().with_base_url("kimi", &format!("http://{upstream}"));
+    let app =
+        App::new(store, [1u8; 32], catalog).pinging_every(std::time::Duration::from_millis(100));
+    let gateway = serve(app.router()).await;
+
+    let text = reqwest::Client::new()
+        .post(format!("http://{gateway}/v1/messages"))
+        .header("x-api-key", &key)
+        .json(&json!({
+            "model": "kimi-for-coding",
+            "max_tokens": 64,
+            "stream": true,
+            "messages": [{ "role": "user", "content": "hi" }],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert!(text.contains("event: ping"), "{text}");
+    let ping = text.find("event: ping").unwrap();
+    let after = &text[ping..];
+    assert!(
+        after.starts_with("event: ping\ndata: {\"type\":\"ping\"}\n\n"),
+        "a ping is a whole frame on its own: {after}"
+    );
+    assert!(text.contains("message_stop"));
+}
+
+async fn kimi_answering(
+    content_type: &'static str,
+    body: &'static str,
+) -> (SocketAddr, String, Store) {
+    let upstream = serve(Router::new().route(
+        "/coding/v1/chat/completions",
+        post(move || async move {
+            Response::builder()
+                .status(200)
+                .header("content-type", content_type)
+                .body(Body::from(body))
+                .unwrap()
+        }),
+    ))
+    .await;
+
+    let store = Store::in_memory(&[7u8; 32]).unwrap();
+    store
+        .add_account("coding plan", "kimi", "api_key", b"key-kimi")
+        .unwrap();
+    let user = store.add_user("jmo").unwrap();
+    let key = store.issue_key(&user.id, "test").unwrap().secret;
+    let catalog = Catalog::builtin().with_base_url("kimi", &format!("http://{upstream}"));
+    let gateway = serve(App::new(store.clone(), [1u8; 32], catalog).router()).await;
+    (gateway, key, store)
+}
+
+async fn claude_code_asks(gateway: SocketAddr, key: &str, stream: bool) -> (u16, String) {
+    let response = reqwest::Client::new()
+        .post(format!("http://{gateway}/v1/messages"))
+        .header("x-api-key", key)
+        .json(&claude_code_turn(stream))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    (status, response.text().await.unwrap())
+}
+
+#[tokio::test]
+async fn a_provider_that_ignores_the_stream_it_was_asked_for_fails_rather_than_answering_empty() {
+    let (gateway, key, store) = kimi_answering(
+        "application/json",
+        r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}"#,
+    )
+    .await;
+
+    for stream in [false, true] {
+        let (status, body) = claude_code_asks(gateway, &key, stream).await;
+        assert_ne!(
+            status, 200,
+            "an answer the gateway could not read must not reach the client as a complete one: {body}"
+        );
+        assert!(body.contains("application/json"), "{body}");
+
+        let row = store
+            .recent_requests(1)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        assert_eq!(row.status, "error", "stream {stream}");
+        assert!(
+            row.error_message
+                .as_deref()
+                .is_some_and(|said| said.contains("hello")),
+            "what the provider sent is the only explanation, so it is kept: {:?}",
+            row.error_message
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_tokens_a_translated_answer_reports_are_the_tokens_recorded() {
+    let (gateway, key, store) = kimi_answering("text/event-stream", CHAT_SSE).await;
+
+    let (status, body) = claude_code_asks(gateway, &key, false).await;
+    assert_eq!(status, 200, "{body}");
+    let told: Value = serde_json::from_str(&body).unwrap();
+    let row = store
+        .recent_requests(1)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+
+    assert_eq!(row.status, "ok");
+    assert_eq!(
+        row.usage.input_tokens,
+        told["usage"]["input_tokens"].as_i64()
+    );
+    assert_eq!(
+        row.usage.output_tokens,
+        told["usage"]["output_tokens"].as_i64()
+    );
+    assert_eq!(
+        row.usage.cache_read_tokens,
+        told["usage"]["cache_read_input_tokens"].as_i64()
+    );
+    assert!(
+        row.usage.output_tokens.is_some(),
+        "usage the provider reported must not be lost on the way through a translation"
+    );
+}
+
+#[tokio::test]
+async fn a_translated_stream_that_was_cut_short_is_recorded_as_a_failure() {
+    let (gateway, key, store) = kimi_answering(
+        "text/event-stream",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Half\"}}]}\n\n",
+    )
+    .await;
+
+    let (_, body) = claude_code_asks(gateway, &key, true).await;
+    assert!(body.contains("event: error"), "{body}");
+    assert!(!body.contains("message_stop"), "{body}");
+
+    let row = store
+        .recent_requests(1)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    assert_eq!(
+        row.status, "error",
+        "a stream the client saw fail must not be counted as a success"
+    );
 }

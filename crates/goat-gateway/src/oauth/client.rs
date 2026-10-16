@@ -1,10 +1,22 @@
-use std::time::Duration;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use serde::Deserialize;
 
 use crate::oauth::{
     BodyFormat, Flow, Mode, account_from_id_token, exchange_fields, refresh_fields,
 };
+
+pub struct Exchange<'a> {
+    pub client_id: &'a str,
+    pub code: &'a str,
+    pub state: &'a str,
+    pub verifier: &'a str,
+    pub redirect_uri: &'a str,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum OauthError {
@@ -26,6 +38,11 @@ pub enum OauthError {
     Unsupported { provider: String, mode: Mode },
     #[error("nobody finished the sign-in within {minutes} minutes")]
     NobodyCame { minutes: u64 },
+    #[error(
+        "{provider} signed you in but did not grant {missing}, so this account cannot be used \
+         for requests. The account may not be eligible, or the permission was declined"
+    )]
+    NotGranted { provider: String, missing: String },
 }
 
 #[derive(Debug, Clone)]
@@ -35,6 +52,7 @@ pub struct Tokens {
     pub id_token: Option<String>,
     pub expires_at: Option<i64>,
     pub account_id: Option<String>,
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -54,6 +72,8 @@ struct TokenResponse {
     id_token: Option<String>,
     #[serde(default)]
     expires_in: Option<i64>,
+    #[serde(default)]
+    scope: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -87,6 +107,7 @@ where
 pub struct Client {
     http: reqwest::Client,
     origin: Option<String>,
+    renewals: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 impl Default for Client {
@@ -101,14 +122,29 @@ impl Client {
     }
 
     pub fn with_http(http: reqwest::Client) -> Self {
-        Self { http, origin: None }
+        Self {
+            http,
+            origin: None,
+            renewals: Arc::default(),
+        }
     }
 
     pub fn against(origin: impl Into<String>) -> Self {
         Self {
-            http: reqwest::Client::new(),
             origin: Some(origin.into().trim_end_matches('/').to_owned()),
+            ..Self::new()
         }
+    }
+
+    pub async fn wait_to_renew(&self, account: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let lane = self
+            .renewals
+            .lock()
+            .expect("renewals mutex")
+            .entry(account.to_owned())
+            .or_default()
+            .clone();
+        lane.lock_owned().await
     }
 
     fn at(&self, url: &str) -> String {
@@ -125,20 +161,41 @@ impl Client {
     pub async fn exchange(
         &self,
         flow: &Flow,
-        code: &str,
-        state: &str,
-        verifier: &str,
-        redirect_uri: &str,
+        exchange: Exchange<'_>,
     ) -> Result<Tokens, OauthError> {
-        let fields = exchange_fields(flow, code, state, verifier, redirect_uri);
-        self.token_call(flow, &self.at(flow.token_url), fields)
-            .await
+        let fields = exchange_fields(
+            flow,
+            exchange.client_id,
+            exchange.code,
+            exchange.state,
+            exchange.verifier,
+            exchange.redirect_uri,
+        );
+        let tokens = self
+            .token_call(flow, flow.body, &self.at(&flow.token_url), fields)
+            .await?;
+        flow.granted(tokens.scope.as_deref())
+            .map_err(|missing| OauthError::NotGranted {
+                provider: flow.provider.clone(),
+                missing: missing.join(", "),
+            })?;
+        Ok(tokens)
     }
 
-    pub async fn refresh(&self, flow: &Flow, refresh_token: &str) -> Result<Tokens, OauthError> {
-        let fields = refresh_fields(flow, refresh_token);
+    pub async fn refresh(
+        &self,
+        flow: &Flow,
+        client_id: &str,
+        refresh_token: &str,
+    ) -> Result<Tokens, OauthError> {
+        let fields = refresh_fields(flow, client_id, refresh_token);
         let mut tokens = self
-            .token_call(flow, &self.at(flow.token_url), fields)
+            .token_call(
+                flow,
+                flow.refresh_format(),
+                &self.at(&flow.token_url),
+                fields,
+            )
             .await?;
         if tokens.refresh.is_none() {
             tokens.refresh = Some(refresh_token.to_owned());
@@ -147,30 +204,33 @@ impl Client {
     }
 
     pub async fn start_device(&self, flow: &Flow) -> Result<DeviceStart, OauthError> {
-        let device = flow.device.ok_or_else(|| OauthError::Unsupported {
-            provider: flow.provider.to_owned(),
-            mode: Mode::Device,
-        })?;
+        let device = flow
+            .device
+            .as_ref()
+            .ok_or_else(|| OauthError::Unsupported {
+                provider: flow.provider.clone(),
+                mode: Mode::Device,
+            })?;
 
         let body = self
             .read_json(
                 flow,
                 self.http
-                    .post(self.at(device.user_code_url))
+                    .post(self.at(&device.user_code_url))
                     .json(&serde_json::json!({ "client_id": flow.client_id })),
-                device.user_code_url,
+                &device.user_code_url,
             )
             .await?;
 
         let parsed: UserCodeResponse =
             serde_json::from_str(&body).map_err(|_| OauthError::Unreadable {
-                provider: flow.provider.to_owned(),
+                provider: flow.provider.clone(),
                 body: body.clone(),
             })?;
 
         Ok(DeviceStart {
             user_code: parsed.user_code,
-            verification_url: device.verification_url.to_owned(),
+            verification_url: device.verification_url.clone(),
             device_auth_id: parsed.device_auth_id,
             interval: parsed.interval.max(1),
         })
@@ -181,10 +241,13 @@ impl Client {
         flow: &Flow,
         start: &DeviceStart,
     ) -> Result<Tokens, OauthError> {
-        let device = flow.device.ok_or_else(|| OauthError::Unsupported {
-            provider: flow.provider.to_owned(),
-            mode: Mode::Device,
-        })?;
+        let device = flow
+            .device
+            .as_ref()
+            .ok_or_else(|| OauthError::Unsupported {
+                provider: flow.provider.clone(),
+                mode: Mode::Device,
+            })?;
 
         const WINDOW_MINUTES: u64 = 15;
         let deadline =
@@ -193,7 +256,7 @@ impl Client {
         let issued = loop {
             let response = self
                 .http
-                .post(self.at(device.poll_url))
+                .post(self.at(&device.poll_url))
                 .json(&serde_json::json!({
                     "device_auth_id": start.device_auth_id,
                     "user_code": start.user_code,
@@ -201,7 +264,7 @@ impl Client {
                 .send()
                 .await
                 .map_err(|source| OauthError::Unreachable {
-                    url: device.poll_url.to_owned(),
+                    url: device.poll_url.clone(),
                     source,
                 })?;
 
@@ -211,7 +274,7 @@ impl Client {
             if status.is_success() {
                 break serde_json::from_str::<DeviceCodeResponse>(&body).map_err(|_| {
                     OauthError::Unreadable {
-                        provider: flow.provider.to_owned(),
+                        provider: flow.provider.clone(),
                         body,
                     }
                 })?;
@@ -221,7 +284,7 @@ impl Client {
                 || status == reqwest::StatusCode::NOT_FOUND;
             if !still_waiting {
                 return Err(OauthError::Refused {
-                    provider: flow.provider.to_owned(),
+                    provider: flow.provider.clone(),
                     status: status.as_u16(),
                     body,
                 });
@@ -238,10 +301,13 @@ impl Client {
 
         self.exchange(
             flow,
-            &issued.authorization_code,
-            "",
-            &issued.code_verifier,
-            device.redirect_uri,
+            Exchange {
+                client_id: &flow.client_id,
+                code: &issued.authorization_code,
+                state: "",
+                verifier: &issued.code_verifier,
+                redirect_uri: &device.redirect_uri,
+            },
         )
         .await
     }
@@ -249,14 +315,15 @@ impl Client {
     async fn token_call(
         &self,
         flow: &Flow,
+        format: BodyFormat,
         url: &str,
-        fields: Vec<(&'static str, String)>,
+        fields: Vec<(String, String)>,
     ) -> Result<Tokens, OauthError> {
-        let request = match flow.body {
+        let request = match format {
             BodyFormat::Json => {
                 let object = fields
                     .into_iter()
-                    .map(|(name, value)| (name.to_owned(), serde_json::Value::String(value)))
+                    .map(|(name, value)| (name, serde_json::Value::String(value)))
                     .collect::<serde_json::Map<_, _>>();
                 self.http.post(url).json(&object)
             }
@@ -266,12 +333,12 @@ impl Client {
         let body = self.read_json(flow, request, url).await?;
         let parsed: TokenResponse =
             serde_json::from_str(&body).map_err(|_| OauthError::Unreadable {
-                provider: flow.provider.to_owned(),
+                provider: flow.provider.clone(),
                 body: body.clone(),
             })?;
 
-        let account_id = match (flow.identity, parsed.id_token.as_deref()) {
-            (Some(identity), Some(id_token)) => account_from_id_token(id_token, &identity),
+        let account_id = match (&flow.identity, parsed.id_token.as_deref()) {
+            (Some(identity), Some(id_token)) => account_from_id_token(id_token, identity),
             _ => None,
         };
 
@@ -283,6 +350,7 @@ impl Client {
                 .expires_in
                 .map(|seconds| crate::store::now() + seconds.saturating_mul(1_000)),
             account_id,
+            scope: parsed.scope,
         })
     }
 
@@ -304,7 +372,7 @@ impl Client {
 
         if !status.is_success() {
             return Err(OauthError::Refused {
-                provider: flow.provider.to_owned(),
+                provider: flow.provider.clone(),
                 status: status.as_u16(),
                 body,
             });
@@ -316,7 +384,13 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::oauth::{ANTHROPIC, OPENAI};
+
+    fn flow(provider: &str) -> Flow {
+        crate::provider::Catalog::builtin()
+            .flow(provider)
+            .cloned()
+            .unwrap()
+    }
 
     #[test]
     fn a_refusal_keeps_the_provider_message_instead_of_flattening_it() {
@@ -350,7 +424,7 @@ mod tests {
     #[tokio::test]
     async fn asking_for_a_mode_a_provider_lacks_names_the_provider() {
         let client = Client::new();
-        let error = client.start_device(&ANTHROPIC).await.unwrap_err();
+        let error = client.start_device(&flow("anthropic")).await.unwrap_err();
         assert!(matches!(
             error,
             OauthError::Unsupported {
@@ -359,11 +433,5 @@ mod tests {
             }
         ));
         assert!(error.to_string().contains("anthropic"));
-    }
-
-    #[test]
-    fn the_two_providers_disagree_on_body_format_and_that_is_carried_as_data() {
-        assert_eq!(ANTHROPIC.body, BodyFormat::Json);
-        assert_eq!(OPENAI.body, BodyFormat::Form);
     }
 }

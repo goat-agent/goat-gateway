@@ -182,6 +182,8 @@ pub fn parse(headers: &HeaderMap, now_ms: i64) -> Snapshot {
         }
     }
 
+    windows.extend(budgets(headers, now_ms));
+
     let binding = headers
         .get("anthropic-ratelimit-unified-representative-claim")
         .and_then(|value| value.to_str().ok())
@@ -223,14 +225,101 @@ fn now() -> i64 {
 }
 
 pub fn retry_after_ms(headers: &HeaderMap, now_ms: i64) -> Option<i64> {
-    if let Some(seconds) = headers
-        .get("retry-after")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|text| text.trim().parse::<i64>().ok())
-    {
-        return Some(now_ms + seconds * 1000);
+    let text = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
+    if let Some(millis) = text("retry-after-ms").and_then(|text| text.trim().parse::<i64>().ok()) {
+        return Some(now_ms + millis);
+    }
+    if let Some(said) = text("retry-after").map(str::trim) {
+        if let Ok(seconds) = said.parse::<i64>() {
+            return Some(now_ms + seconds * 1000);
+        }
+        if let Ok(when) =
+            time::OffsetDateTime::parse(said, &time::format_description::well_known::Rfc2822)
+        {
+            return Some((when.unix_timestamp_nanos() / 1_000_000) as i64);
+        }
     }
     parse(headers, now_ms).soonest_reset()
+}
+
+fn budgets(headers: &HeaderMap, now_ms: i64) -> Vec<Window> {
+    let text = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
+    let mut found = Vec::new();
+
+    for name in headers.keys().map(|name| name.as_str()) {
+        let named = if let Some(dimension) = name.strip_prefix("x-ratelimit-remaining-") {
+            Some((
+                dimension,
+                format!("x-ratelimit-limit-{dimension}"),
+                format!("x-ratelimit-reset-{dimension}"),
+            ))
+        } else {
+            name.strip_prefix("anthropic-ratelimit-")
+                .and_then(|rest| rest.strip_suffix("-remaining"))
+                .filter(|dimension| !dimension.starts_with("unified"))
+                .map(|dimension| {
+                    (
+                        dimension,
+                        format!("anthropic-ratelimit-{dimension}-limit"),
+                        format!("anthropic-ratelimit-{dimension}-reset"),
+                    )
+                })
+        };
+        let Some((dimension, limit_name, reset_name)) = named else {
+            continue;
+        };
+
+        let number = |name: &str| text(name).and_then(|text| text.trim().parse::<f64>().ok());
+        let (Some(limit), Some(remaining)) = (number(&limit_name), number(name)) else {
+            continue;
+        };
+        if limit <= 0.0 {
+            continue;
+        }
+
+        found.push(Window {
+            label: dimension.to_owned(),
+            scope: None,
+            used_percent: ((limit - remaining) / limit * 100.0).clamp(0.0, 100.0),
+            resets_at_ms: text(&reset_name).and_then(|text| {
+                duration_ms(text)
+                    .map(|left| now_ms + left)
+                    .or_else(|| parse_reset(text, now_ms))
+            }),
+        });
+    }
+    found
+}
+
+fn duration_ms(text: &str) -> Option<i64> {
+    let mut rest = text.trim();
+    if rest.is_empty() {
+        return None;
+    }
+    let mut total = 0.0;
+    while !rest.is_empty() {
+        let digits = rest.find(|c: char| !(c.is_ascii_digit() || c == '.'))?;
+        if digits == 0 {
+            return None;
+        }
+        let (number, tail) = rest.split_at(digits);
+        let unit_ends = tail
+            .find(|c: char| c.is_ascii_digit() || c == '.')
+            .unwrap_or(tail.len());
+        let (unit, next) = tail.split_at(unit_ends);
+        let scale = match unit {
+            "h" => 3_600_000.0,
+            "m" => 60_000.0,
+            "s" => 1_000.0,
+            "ms" => 1.0,
+            "us" | "µs" => 0.001,
+            "ns" => 0.000_001,
+            _ => return None,
+        };
+        total += number.parse::<f64>().ok()? * scale;
+        rest = next;
+    }
+    Some(total.round() as i64)
 }
 
 fn codex_buckets(headers: &HeaderMap) -> Vec<String> {
@@ -324,16 +413,16 @@ mod tests {
             Verdict::Exhausted { .. }
         ));
 
-        assert_eq!(
-            classify(
-                429,
-                &headers(&[("retry-after", "30")]),
-                &Snapshot::default()
-            ),
-            Verdict::Exhausted {
-                until: crate::store::now() + 30_000
-            }
+        let before = crate::store::now();
+        let verdict = classify(
+            429,
+            &headers(&[("retry-after", "30")]),
+            &Snapshot::default(),
         );
+        let Verdict::Exhausted { until } = verdict else {
+            panic!("an explicit wait is a reported limit: {verdict:?}");
+        };
+        assert!((before + 30_000..=crate::store::now() + 30_000).contains(&until));
     }
 
     #[test]
@@ -492,6 +581,129 @@ mod tests {
             NOW,
         );
         assert_eq!(at, Some(NOW + 30_000));
+    }
+
+    #[test]
+    fn a_request_and_token_budget_reads_as_one_window_per_dimension() {
+        let snapshot = parse(
+            &headers(&[
+                ("x-ratelimit-limit-requests", "500"),
+                ("x-ratelimit-remaining-requests", "499"),
+                ("x-ratelimit-reset-requests", "120ms"),
+                ("x-ratelimit-limit-tokens", "30000"),
+                ("x-ratelimit-remaining-tokens", "6000"),
+                ("x-ratelimit-reset-tokens", "6m0s"),
+            ]),
+            NOW,
+        );
+
+        let tokens = snapshot
+            .windows
+            .iter()
+            .find(|window| window.label == "tokens")
+            .expect("the token budget");
+        assert_eq!(tokens.used_percent, 80.0);
+        assert_eq!(tokens.resets_at_ms, Some(NOW + 360_000));
+
+        let requests = snapshot
+            .windows
+            .iter()
+            .find(|window| window.label == "requests")
+            .expect("the request budget");
+        assert_eq!(requests.resets_at_ms, Some(NOW + 120));
+        assert_eq!(snapshot.pressure_for(None), Some(80.0));
+    }
+
+    #[test]
+    fn a_dimension_nobody_listed_is_still_read() {
+        let snapshot = parse(
+            &headers(&[
+                ("x-ratelimit-limit-req-minute", "60"),
+                ("x-ratelimit-remaining-req-minute", "15"),
+            ]),
+            NOW,
+        );
+        assert_eq!(snapshot.windows[0].label, "req-minute");
+        assert_eq!(snapshot.windows[0].used_percent, 75.0);
+        assert_eq!(snapshot.windows[0].resets_at_ms, None);
+    }
+
+    #[test]
+    fn an_api_key_tier_on_anthropic_is_read_beside_the_subscription_windows() {
+        let snapshot = parse(
+            &headers(&[
+                ("anthropic-ratelimit-input-tokens-limit", "400000"),
+                ("anthropic-ratelimit-input-tokens-remaining", "100000"),
+                (
+                    "anthropic-ratelimit-input-tokens-reset",
+                    "2026-08-10T12:00:00Z",
+                ),
+                ("anthropic-ratelimit-unified-5h-utilization", "0.10"),
+            ]),
+            NOW,
+        );
+        let input = snapshot
+            .windows
+            .iter()
+            .find(|window| window.label == "input-tokens")
+            .expect("the input token budget");
+        assert_eq!(input.used_percent, 75.0);
+        assert_eq!(input.resets_at_ms, Some(1_786_363_200_000));
+        assert!(
+            snapshot.windows.iter().any(|window| window.label == "5h"),
+            "the unified headers must not be mistaken for a tier budget"
+        );
+        assert!(
+            !snapshot
+                .windows
+                .iter()
+                .any(|window| window.label.contains("unified"))
+        );
+    }
+
+    #[test]
+    fn a_budget_with_no_limit_is_not_a_full_one() {
+        let snapshot = parse(
+            &headers(&[
+                ("x-ratelimit-limit-tokens", "0"),
+                ("x-ratelimit-remaining-tokens", "0"),
+            ]),
+            NOW,
+        );
+        assert!(
+            snapshot.is_empty(),
+            "a limit of zero says nothing about how much is used"
+        );
+    }
+
+    #[test]
+    fn retry_after_is_understood_as_a_date_and_in_milliseconds() {
+        assert_eq!(
+            retry_after_ms(&headers(&[("retry-after-ms", "1500")]), NOW),
+            Some(NOW + 1_500)
+        );
+        assert_eq!(
+            retry_after_ms(
+                &headers(&[("retry-after", "Mon, 10 Aug 2026 12:00:00 GMT")]),
+                NOW
+            ),
+            Some(1_786_363_200_000)
+        );
+    }
+
+    #[test]
+    fn a_429_on_a_spent_minute_parks_the_account_until_that_minute_turns() {
+        let spent = headers(&[
+            ("x-ratelimit-limit-tokens", "30000"),
+            ("x-ratelimit-remaining-tokens", "0"),
+            ("x-ratelimit-reset-tokens", "6s"),
+        ]);
+        let before = crate::store::now();
+        let verdict = classify(429, &spent, &parse(&spent, before));
+        let Verdict::Exhausted { until } = verdict else {
+            panic!("a reported budget at zero is spent, not a transient throttle: {verdict:?}");
+        };
+        assert!((before + 5_000..=crate::store::now() + 7_000).contains(&until));
     }
 
     #[test]

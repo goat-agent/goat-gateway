@@ -1,7 +1,21 @@
 import { useState } from "react";
-import { Body, Cell, Count, Foot, Head, Nothing, Page, Panel, PanelHead, Row, Select, Table } from "@/shared/ui";
+import {
+  Body,
+  Cell,
+  Count,
+  Foot,
+  Head,
+  Nothing,
+  Page,
+  Panel,
+  PanelHead,
+  Row,
+  Select,
+  Table,
+  rowHover,
+} from "@/shared/ui";
 import { query, useResource } from "@/shared/api";
-import { SPANS, WEEK, spanOf, type Span } from "@/shared/config/spans";
+import { SPAN_CHOICES, WEEK, spanOf, type Span } from "@/shared/config/spans";
 import { seriesColor } from "@/shared/model/series";
 import { count, money, tokens } from "@/shared/lib/format";
 import { GROUPINGS, METRICS, groupingOf, type MetricName, type UsageReport } from "@/entities/usage";
@@ -9,6 +23,8 @@ import { MetricChart } from "@/widgets/metric-chart";
 import { UsageBars } from "@/widgets/usage-bars";
 import { MetricPicker } from "@/features/pick-metric";
 import { FilterChips, useFilter } from "@/features/filter-requests";
+
+const GROUPING_CHOICES = GROUPINGS.map((grouping) => ({ value: grouping, label: `by ${grouping}` }));
 
 export function UsagePage() {
   const { held, set } = useFilter(GROUPINGS);
@@ -26,45 +42,48 @@ export function UsagePage() {
   return (
     <Page
       title="Usage"
-      note={report.error}
-      aside={
+      note={`${span.label.toLowerCase()}, by ${by}`}
+      refused={report.error}
+      toolbar={
         <>
-          <Select className="w-32" value={by} onChange={(event) => setBy(groupingOf(event.target.value))}>
-            {GROUPINGS.map((grouping) => (
-              <option key={grouping} value={grouping}>
-                by {grouping}
-              </option>
-            ))}
-          </Select>
           <Select
+            label="Group by"
+            className="w-36"
+            value={by}
+            choices={GROUPING_CHOICES}
+            onChange={setBy}
+          />
+          <Select
+            label="Window"
             className="w-36"
             value={String(span.ms)}
-            onChange={(event) => setSpan(spanOf(event.target.value))}
-          >
-            {SPANS.map((entry) => (
-              <option key={entry.ms} value={entry.ms}>
-                {entry.label}
-              </option>
-            ))}
-          </Select>
+            choices={SPAN_CHOICES}
+            onChange={(value) => setSpan(spanOf(value))}
+          />
+          {narrowed ? <span className="mx-1 h-4 w-[var(--hairline)] bg-line" /> : null}
+          <FilterChips held={held} onDrop={(field) => set(field, "")} />
         </>
       }
     >
-      <FilterChips held={held} onDrop={(field) => set(field, "")} />
-
       <Panel>
         <PanelHead title="Over time" note={`by ${by}`}>
           <MetricPicker chosen={chosen} onPick={setChosen} />
         </PanelHead>
         {data ? (
-          <MetricChart buckets={data.series} metric={shown} bucketMs={data.bucket_ms} space={by} />
+          <MetricChart
+            buckets={data.series}
+            metric={shown}
+            bucketMs={data.bucket_ms}
+            windowMs={span.ms}
+            space={by}
+          />
         ) : (
-          <div className="h-[188px]" />
+          <div className="h-[216px]" />
         )}
       </Panel>
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,20rem)_minmax(0,1fr)]">
-        <Panel>
+        <Panel className="self-start">
           <PanelHead title={shown.label} note={`by ${by}`} />
           {data ? (
             <UsageBars
@@ -82,7 +101,7 @@ export function UsagePage() {
             <Table>
               <Head>
                 <Row>
-                  <th>{by}</th>
+                  <th className="capitalize">{by}</th>
                   <Count>Requests</Count>
                   <Count>Errors</Count>
                   <Count>In</Count>
@@ -94,18 +113,18 @@ export function UsagePage() {
               </Head>
               <Body>
                 {data.breakdown.map((slice) => (
-                  <Row key={slice.key}>
+                  <Row key={slice.key} className={rowHover}>
                     <td>
-                      <span className="flex items-center gap-2">
+                      <span className="flex items-center gap-2.5 font-medium text-ink">
                         <span
-                          className="size-2 shrink-0 rounded-[2px]"
+                          className="size-2.5 shrink-0 rounded-[3px]"
                           style={{ background: seriesColor(by, slice.key) }}
                         />
-                        {slice.key || "unattributed"}
+                        <span className="max-w-64 truncate">{slice.key || "unattributed"}</span>
                       </span>
                     </td>
                     <Cell>{count(slice.totals.requests)}</Cell>
-                    <Cell className={slice.totals.errors > 0 ? "text-[var(--critical)]" : undefined}>
+                    <Cell className={slice.totals.errors > 0 ? "text-critical-text" : undefined}>
                       {count(slice.totals.errors)}
                     </Cell>
                     <Cell>{tokens(slice.totals.usage.input_tokens)}</Cell>

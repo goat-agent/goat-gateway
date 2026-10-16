@@ -42,6 +42,10 @@ impl std::fmt::Display for Wire {
 pub struct Endpoint {
     pub wire: Wire,
     pub url: String,
+    #[serde(default)]
+    pub knock: Option<serde_json::Map<String, serde_json::Value>>,
+    #[serde(default)]
+    pub refuses: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -53,7 +57,7 @@ pub struct Price {
     pub cache_write: i64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Thinking {
     Adaptive,
@@ -100,7 +104,7 @@ impl Model {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Key {
     Bearer,
@@ -136,6 +140,64 @@ pub struct WindowAt {
     pub resets_in_seconds: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Carried {
+    pub header: String,
+    pub starts_with: String,
+    #[serde(default)]
+    pub alongside: Option<String>,
+    pub hosts: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Refusal {
+    pub status: u16,
+    #[serde(default)]
+    pub says: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub credential: Option<String>,
+    pub demote_minutes: u32,
+}
+
+impl Refusal {
+    pub fn fits(&self, status: u16, body: &str, said: Option<&str>, credential: &str) -> bool {
+        self.status == status
+            && self.says.as_deref().is_none_or(|says| body.contains(says))
+            && self
+                .message
+                .as_deref()
+                .is_none_or(|message| said == Some(message))
+            && self
+                .credential
+                .as_deref()
+                .is_none_or(|kind| kind == credential)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CarriedCredential {
+    pub provider: String,
+    pub header: String,
+    pub value: String,
+    pub hosts: Vec<String>,
+}
+
+impl CarriedCredential {
+    pub fn may_reach(&self, url: &str) -> bool {
+        let host = url
+            .split_once("://")
+            .map_or(url, |(_, rest)| rest)
+            .split(['/', ':'])
+            .next()
+            .unwrap_or_default();
+        self.hosts.iter().any(|allowed| allowed == host)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Provider {
@@ -151,6 +213,20 @@ pub struct Provider {
     pub key: Key,
     #[serde(default)]
     pub models: Vec<Model>,
+    #[serde(default)]
+    pub carried: Vec<Carried>,
+    #[serde(default)]
+    pub refusals: Vec<Refusal>,
+    #[serde(default)]
+    pub sign_in: Option<crate::oauth::Flow>,
+    #[serde(default)]
+    pub check: Option<String>,
+    #[serde(default = "takes_keys")]
+    pub api_key: bool,
+}
+
+fn takes_keys() -> bool {
+    true
 }
 
 fn no_limits() -> Limits {
@@ -232,6 +308,18 @@ impl Provider {
         Ok(carry(endpoint))
     }
 
+    pub fn refusal(
+        &self,
+        status: u16,
+        body: &str,
+        said: Option<&str>,
+        credential: &str,
+    ) -> Option<&Refusal> {
+        self.refusals
+            .iter()
+            .find(|refusal| refusal.fits(status, body, said, credential))
+    }
+
     pub fn model_names(&self) -> Vec<&str> {
         self.models
             .iter()
@@ -265,6 +353,10 @@ pub struct Catalog {
 }
 
 impl Catalog {
+    pub fn builtin_text() -> &'static str {
+        BUILTIN
+    }
+
     pub fn builtin() -> Self {
         Self::parse(BUILTIN, "the built-in provider list").expect("built-in providers are valid")
     }
@@ -287,6 +379,9 @@ impl Catalog {
                 return Err(CatalogError::NoEndpoints { provider: id });
             }
             provider.id = id.clone();
+            if let Some(flow) = &mut provider.sign_in {
+                flow.provider = id.clone();
+            }
             providers.insert(id, provider);
         }
         Ok(Self { providers })
@@ -298,12 +393,26 @@ impl Catalog {
             for endpoint in &mut entry.endpoints {
                 endpoint.url = format!("{base}{}", path_of(&endpoint.url));
             }
+            if let Limits::Endpoint(asked) = &mut entry.limits {
+                asked.url = format!("{base}{}", path_of(&asked.url));
+            }
+            if let Some(check) = &mut entry.check {
+                *check = format!("{base}{}", path_of(check));
+            }
         }
         self
     }
 
     pub fn get(&self, id: &str) -> Option<&Provider> {
         self.providers.get(id)
+    }
+
+    pub fn flow(&self, provider: &str) -> Option<&crate::oauth::Flow> {
+        self.get(provider)?.sign_in.as_ref()
+    }
+
+    pub fn flows(&self) -> impl Iterator<Item = &crate::oauth::Flow> {
+        self.iter().filter_map(|provider| provider.sign_in.as_ref())
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Provider> {
@@ -320,11 +429,71 @@ impl Catalog {
         model: &str,
         available: &[String],
     ) -> Result<Route, Unroutable> {
-        if let Some((provider, declared)) = self
+        self.route_for(ingress, model, available, &[])
+    }
+
+    pub fn recognize(
+        &self,
+        headers: &axum::http::HeaderMap,
+    ) -> Option<Result<CarriedCredential, String>> {
+        let presented = ["authorization", "x-api-key"]
+            .into_iter()
+            .find_map(|name| Some((name, headers.get(name)?.to_str().ok()?)))?;
+        let found = self.iter().find_map(|provider| {
+            provider.carried.iter().find_map(|shape| {
+                let value = headers.get(shape.header.as_str())?.to_str().ok()?;
+                let alongside = shape
+                    .alongside
+                    .as_deref()
+                    .is_none_or(|name| headers.contains_key(name));
+                (value.starts_with(&shape.starts_with) && alongside).then(|| CarriedCredential {
+                    provider: provider.id.clone(),
+                    header: shape.header.clone(),
+                    value: value.to_owned(),
+                    hosts: shape.hosts.clone(),
+                })
+            })
+        });
+        Some(found.ok_or_else(|| presented.0.to_owned()))
+    }
+
+    pub fn route_for(
+        &self,
+        ingress: Wire,
+        model: &str,
+        available: &[String],
+        preferred: &[String],
+    ) -> Result<Route, Unroutable> {
+        let declaring: Vec<(&Provider, &Model)> = self
             .iter()
-            .find_map(|provider| Some((provider, provider.model(model)?)))
-        {
-            return provider.route(ingress, model, Some(declared.clone()));
+            .filter_map(|provider| Some((provider, provider.model(model)?)))
+            .collect();
+
+        if let [(provider, declared)] = declaring.as_slice() {
+            return provider.route(ingress, model, Some((*declared).clone()));
+        }
+
+        if !declaring.is_empty() {
+            let registered: Vec<&Provider> = declaring
+                .iter()
+                .map(|(provider, _)| *provider)
+                .filter(|provider| available.contains(&provider.id))
+                .collect();
+            if registered.is_empty() {
+                let (first, declared) = declaring[0];
+                return first.route(ingress, model, Some(declared.clone()));
+            }
+            return match shortlist(registered, ingress).as_slice() {
+                [] => Err(Unroutable::NobodySpeaks { wire: ingress }),
+                [only] => only.route(ingress, model, only.model(model).cloned()),
+                several => match favourite(several, preferred) {
+                    Some(chosen) => chosen.route(ingress, model, chosen.model(model).cloned()),
+                    None => Err(Unroutable::DeclaredBySeveral {
+                        model: model.to_owned(),
+                        candidates: labels(several),
+                    }),
+                },
+            };
         }
 
         let registered: Vec<&Provider> = self
@@ -332,30 +501,47 @@ impl Catalog {
             .filter(|provider| available.contains(&provider.id))
             .collect();
 
-        let native: Vec<&Provider> = registered
-            .iter()
-            .copied()
-            .filter(|provider| provider.speaks(ingress))
-            .collect();
-        let reachable: Vec<&Provider> = registered
-            .into_iter()
-            .filter(|provider| provider.reachable(ingress))
-            .collect();
-
-        let shortlist = if native.is_empty() { reachable } else { native };
-        match shortlist.as_slice() {
+        match shortlist(registered, ingress).as_slice() {
             [] => Err(Unroutable::NobodySpeaks { wire: ingress }),
             [only] => only.route(ingress, model, None),
-            several => Err(Unroutable::Ambiguous {
-                model: model.to_owned(),
-                candidates: several
-                    .iter()
-                    .map(|provider| provider.label.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" and "),
-            }),
+            several => match favourite(several, preferred) {
+                Some(chosen) => chosen.route(ingress, model, None),
+                None => Err(Unroutable::Ambiguous {
+                    model: model.to_owned(),
+                    candidates: labels(several),
+                }),
+            },
         }
     }
+}
+
+fn shortlist(candidates: Vec<&Provider>, ingress: Wire) -> Vec<&Provider> {
+    let native: Vec<&Provider> = candidates
+        .iter()
+        .copied()
+        .filter(|provider| provider.speaks(ingress))
+        .collect();
+    if !native.is_empty() {
+        return native;
+    }
+    candidates
+        .into_iter()
+        .filter(|provider| provider.reachable(ingress))
+        .collect()
+}
+
+fn favourite<'a>(several: &[&'a Provider], preferred: &[String]) -> Option<&'a Provider> {
+    preferred
+        .iter()
+        .find_map(|id| several.iter().find(|provider| &provider.id == id).copied())
+}
+
+fn labels(providers: &[&Provider]) -> String {
+    providers
+        .iter()
+        .map(|provider| provider.label.as_str())
+        .collect::<Vec<_>>()
+        .join(" and ")
 }
 
 #[derive(Debug, Clone)]
@@ -406,6 +592,11 @@ pub enum Unroutable {
     )]
     Ambiguous { model: String, candidates: String },
     #[error(
+        "model {model:?} is declared by {candidates}, and accounts are registered for each. \
+         Remove it from all but one of them in config.toml, or keep accounts for only one."
+    )]
+    DeclaredBySeveral { model: String, candidates: String },
+    #[error(
         "model {model:?} has to be translated into {wire} to be served, and translating needs it \
          declared with thinking and max_tokens, so the gateway knows how it reasons and how much \
          it may write. Declared models: {known}"
@@ -455,13 +646,7 @@ mod tests {
     #[test]
     fn a_model_without_a_published_price_has_none() {
         let catalog = Catalog::builtin();
-        assert!(
-            catalog
-                .model("anthropic", "claude-fable-5")
-                .unwrap()
-                .price
-                .is_none()
-        );
+        assert!(catalog.model("zai", "glm-4.7").unwrap().price.is_none());
         assert!(
             catalog
                 .model("anthropic", "claude-sonnet-5")
@@ -658,6 +843,68 @@ mod tests {
 
         assert!(matches!(error, CatalogError::Parse { .. }), "{error}");
         assert!(error.to_string().contains("config.toml"), "{error}");
+    }
+
+    #[test]
+    fn a_chatgpt_sign_in_is_its_own_provider_because_it_answers_on_its_own_host() {
+        let catalog = Catalog::builtin();
+        let chatgpt = catalog.get("chatgpt").expect("chatgpt is declared");
+        let openai = catalog.get("openai").unwrap();
+        assert_ne!(
+            chatgpt.endpoint(Wire::Responses).unwrap().url,
+            openai.endpoint(Wire::Responses).unwrap().url,
+            "a subscription token sent to the pay-per-token host is refused"
+        );
+        assert!(
+            !chatgpt.speaks(Wire::Chat),
+            "the codex backend serves Responses only"
+        );
+    }
+
+    #[test]
+    fn a_model_two_providers_declare_goes_to_the_one_with_an_account() {
+        let catalog = Catalog::builtin();
+        for (registered, expected) in [("chatgpt", "chatgpt"), ("openai", "openai")] {
+            let route = catalog
+                .route(Wire::Responses, "gpt-5", &[registered.to_owned()])
+                .unwrap_or_else(|error| panic!("{registered}: {error}"));
+            assert_eq!(route.provider, expected);
+        }
+    }
+
+    #[test]
+    fn of_two_registered_providers_declaring_a_model_the_native_speaker_wins() {
+        let catalog = Catalog::builtin();
+        let route = catalog
+            .route(
+                Wire::Chat,
+                "gpt-5",
+                &["chatgpt".to_owned(), "openai".to_owned()],
+            )
+            .unwrap();
+        assert_eq!(route.provider, "openai");
+        assert!(!route.translates_from(Wire::Chat));
+    }
+
+    #[test]
+    fn two_registered_providers_that_both_serve_a_model_natively_are_named_not_tossed() {
+        let catalog = Catalog::builtin();
+        let error = catalog
+            .route(
+                Wire::Responses,
+                "gpt-5",
+                &["chatgpt".to_owned(), "openai".to_owned()],
+            )
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(
+            matches!(error, Unroutable::DeclaredBySeveral { .. }),
+            "{message}"
+        );
+        assert!(
+            message.contains("ChatGPT") && message.contains("OpenAI"),
+            "{message}"
+        );
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use crate::{
-    oauth::{Client, Flow, OauthError, Tokens, flow},
+    oauth::{Client, Flow, OauthError, Tokens},
     store::{Store, StoreError, now},
     upstream::{Auth, Oauth},
 };
@@ -16,6 +16,8 @@ pub struct Stored {
     pub expires_at: Option<i64>,
     #[serde(default)]
     pub account_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
 }
 
 impl Stored {
@@ -25,7 +27,13 @@ impl Stored {
             refresh: tokens.refresh.clone(),
             expires_at: tokens.expires_at,
             account_id: tokens.account_id.clone(),
+            client_id: None,
         }
+    }
+
+    pub fn issued_by(mut self, client_id: Option<String>) -> Self {
+        self.client_id = client_id;
+        self
     }
 
     pub fn stale_at(&self, instant: i64) -> bool {
@@ -59,12 +67,12 @@ pub enum PrepareError {
 #[derive(Debug)]
 pub struct Prepared {
     pub auth: Auth,
-    pub base_url: Option<&'static str>,
 }
 
 pub async fn prepare(
     store: &Store,
     client: &Client,
+    flow: Option<&Flow>,
     account: &str,
     provider: &str,
     credential_kind: &str,
@@ -73,10 +81,9 @@ pub async fn prepare(
     match credential_kind {
         "api_key" => Ok(Prepared {
             auth: Auth::ApiKey(String::from_utf8_lossy(secret).into_owned()),
-            base_url: None,
         }),
         KIND => {
-            let declared = flow(provider).ok_or_else(|| PrepareError::UnknownProvider {
+            let declared = flow.ok_or_else(|| PrepareError::UnknownProvider {
                 account: account.to_owned(),
                 provider: provider.to_owned(),
             })?;
@@ -85,10 +92,9 @@ pub async fn prepare(
                     account: account.to_owned(),
                 })?;
 
-            let fresh = renew_if_stale(store, client, declared, account, provider, stored).await?;
+            let fresh = renew_if_stale(store, client, declared, account, stored).await?;
             Ok(Prepared {
                 auth: Auth::Oauth(headers_for(declared, &fresh)),
-                base_url: declared.base_url,
             })
         }
         other => Err(PrepareError::UnknownKind {
@@ -101,11 +107,20 @@ pub async fn prepare(
 async fn renew_if_stale(
     store: &Store,
     client: &Client,
-    declared: &'static Flow,
+    declared: &Flow,
     account: &str,
-    provider: &str,
     stored: Stored,
 ) -> Result<Stored, PrepareError> {
+    if !stored.stale_at(now()) || stored.refresh.is_none() {
+        return Ok(stored);
+    }
+
+    let _turn = client.wait_to_renew(account).await;
+    let stored = store
+        .secret(account)
+        .ok()
+        .and_then(|latest| serde_json::from_slice::<Stored>(&latest).ok())
+        .unwrap_or(stored);
     if !stored.stale_at(now()) {
         return Ok(stored);
     }
@@ -113,39 +128,48 @@ async fn renew_if_stale(
         return Ok(stored);
     };
 
-    let tokens =
-        client
-            .refresh(declared, &refresh)
-            .await
-            .map_err(|source| PrepareError::Expired {
-                account: account.to_owned(),
-                source,
-            })?;
+    let client_id = stored
+        .client_id
+        .clone()
+        .unwrap_or_else(|| declared.client_id.clone());
+    let tokens = client
+        .refresh(declared, &client_id, &refresh)
+        .await
+        .map_err(|source| PrepareError::Expired {
+            account: account.to_owned(),
+            source,
+        })?;
 
-    let mut renewed = Stored::from_tokens(&tokens);
+    let mut renewed = Stored::from_tokens(&tokens).issued_by(stored.client_id);
     if renewed.account_id.is_none() {
         renewed.account_id = stored.account_id;
     }
-    store.add_account(account, provider, KIND, &renewed.to_bytes())?;
+    store.replace_secret(account, &renewed.to_bytes())?;
     Ok(renewed)
 }
 
-fn headers_for(declared: &'static Flow, stored: &Stored) -> Oauth {
+fn headers_for(declared: &Flow, stored: &Stored) -> Oauth {
     let mut extra = Vec::new();
-    if let (Some(identity), Some(account_id)) = (declared.identity, stored.account_id.as_deref()) {
-        extra.push((identity.header.to_owned(), account_id.to_owned()));
+    if let (Some(identity), Some(account_id)) = (&declared.identity, stored.account_id.as_deref()) {
+        extra.push((identity.header.clone(), account_id.to_owned()));
     }
     Oauth {
         token: stored.access.clone(),
         extra,
-        merge_beta: declared.merge_beta.map(str::to_owned),
+        merge_beta: declared.merge_beta.clone(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::oauth::{ANTHROPIC, OPENAI};
+
+    fn flow(provider: &str) -> Flow {
+        crate::provider::Catalog::builtin()
+            .flow(provider)
+            .cloned()
+            .unwrap()
+    }
 
     fn store() -> Store {
         Store::in_memory(&[9u8; 32]).unwrap()
@@ -156,6 +180,7 @@ mod tests {
         let prepared = prepare(
             &store(),
             &Client::new(),
+            Some(&flow("anthropic")),
             "personal",
             "anthropic",
             "api_key",
@@ -164,7 +189,6 @@ mod tests {
         .await
         .unwrap();
         assert!(matches!(prepared.auth, Auth::ApiKey(key) if key == "sk-ant-secret"));
-        assert_eq!(prepared.base_url, None);
     }
 
     #[tokio::test]
@@ -174,12 +198,14 @@ mod tests {
             refresh: Some("rt".into()),
             expires_at: Some(now() + 3_600_000),
             account_id: Some("acct_1".into()),
+            client_id: None,
         };
         let prepared = prepare(
             &store(),
             &Client::new(),
+            Some(&flow("chatgpt")),
+            "ChatGPT",
             "chatgpt",
-            "openai",
             KIND,
             &stored.to_bytes(),
         )
@@ -194,7 +220,6 @@ mod tests {
             oauth.extra,
             vec![("chatgpt-account-id".to_owned(), "acct_1".to_owned())]
         );
-        assert_eq!(prepared.base_url, OPENAI.base_url);
     }
 
     #[tokio::test]
@@ -204,10 +229,12 @@ mod tests {
             refresh: None,
             expires_at: None,
             account_id: Some("ignored".into()),
+            client_id: None,
         };
         let prepared = prepare(
             &store(),
             &Client::new(),
+            Some(&flow("anthropic")),
             "claude",
             "anthropic",
             KIND,
@@ -219,12 +246,11 @@ mod tests {
         let Auth::Oauth(oauth) = prepared.auth else {
             panic!("expected an oauth credential");
         };
-        assert_eq!(oauth.merge_beta.as_deref(), ANTHROPIC.merge_beta);
+        assert_eq!(oauth.merge_beta, flow("anthropic").merge_beta);
         assert!(
             oauth.extra.is_empty(),
             "anthropic declares no identity header, so nothing should be invented for it"
         );
-        assert_eq!(prepared.base_url, None);
     }
 
     #[tokio::test]
@@ -234,10 +260,12 @@ mod tests {
             refresh: None,
             expires_at: Some(now() - 1),
             account_id: None,
+            client_id: None,
         };
         let prepared = prepare(
             &store(),
             &Client::new(),
+            Some(&flow("anthropic")),
             "claude",
             "anthropic",
             KIND,
@@ -256,6 +284,7 @@ mod tests {
         let error = prepare(
             &store(),
             &Client::new(),
+            Some(&flow("anthropic")),
             "claude",
             "anthropic",
             KIND,
@@ -273,6 +302,7 @@ mod tests {
             refresh: None,
             expires_at: Some(now() + 30_000),
             account_id: None,
+            client_id: None,
         };
         assert!(stored.stale_at(now()));
 
@@ -290,6 +320,7 @@ mod tests {
             refresh: Some("rt".into()),
             expires_at: None,
             account_id: None,
+            client_id: None,
         };
         assert!(!stored.stale_at(now()));
     }

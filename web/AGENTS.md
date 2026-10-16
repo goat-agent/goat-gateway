@@ -29,6 +29,10 @@ zustand, never `localStorage` directly. The `persist` middleware handles storage
 
 - `shared/model/session` — whether the gateway wants its admin key.
 - `shared/model/series` — which colour slot an entity holds, per chart.
+- `shared/model/commands` — whether the command menu is open, and the commands pages have
+  registered with `useCommand` while they are mounted.
+- `shared/ui/confirm-dialog` — the question `confirmed()` is waiting on. Never `window.confirm`.
+- `widgets/app-shell/model/sheet` — whether the keyboard shortcut sheet is open.
 - `features/toggle-theme/model` — dark or light.
 - `entities/request/model/live` — requests in flight.
 

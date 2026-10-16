@@ -1,9 +1,589 @@
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::{
     envelope::{Envelopes, Payload, Portability, Provenance, Sealed},
+    mapping::{Mapping, TranslateError, Translated},
     sse::{Frame, Parser},
 };
+
+const WIRE: &str = "OpenAI Responses";
+
+const CARRIED: &[&str] = &[
+    "model",
+    "system",
+    "messages",
+    "max_tokens",
+    "tools",
+    "tool_choice",
+    "thinking",
+    "output_config",
+    "temperature",
+    "top_p",
+    "top_k",
+    "stop_sequences",
+    "stream",
+    "metadata",
+];
+
+#[derive(Debug, Clone)]
+pub struct RequestTarget {
+    pub model: String,
+    pub provenance: Provenance,
+}
+
+pub fn translate(
+    input: &[u8],
+    target: &RequestTarget,
+    envelopes: &Envelopes,
+) -> Result<Translated, TranslateError> {
+    let source: Value = serde_json::from_slice(input)?;
+    let mut mapping = Mapping::default();
+    let mut out = Map::new();
+
+    out.insert("model".into(), json!(target.model));
+    mapping.moved();
+
+    if let Some(system) = source.get("system") {
+        let text = joined_text(system);
+        if !text.is_empty() {
+            out.insert("instructions".into(), json!(text));
+        }
+        mapping.moved();
+    }
+
+    let mut converting = Converting {
+        target,
+        envelopes,
+        items: Vec::new(),
+        mapping: &mut mapping,
+        cache_marked: source.pointer("/system").is_some_and(marked),
+    };
+    match source.get("messages") {
+        Some(Value::Array(messages)) => {
+            for (index, message) in messages.iter().enumerate() {
+                converting.message(message, index)?;
+            }
+        }
+        Some(other) => {
+            return Err(TranslateError::Malformed {
+                what: "/messages".into(),
+                detail: format!("expected an array, found {other}"),
+            });
+        }
+        None => {}
+    }
+    let Converting {
+        items,
+        cache_marked,
+        ..
+    } = converting;
+    out.insert("input".into(), Value::Array(items));
+
+    if let Some(max) = source.get("max_tokens") {
+        out.insert("max_output_tokens".into(), max.clone());
+        mapping.moved();
+    }
+
+    let mut tools_marked = false;
+    if let Some(tools) = source.get("tools") {
+        let converted = convert_tools(tools, &mut mapping, &mut tools_marked)?;
+        if !converted.is_empty() {
+            out.insert("tools".into(), Value::Array(converted));
+        }
+    }
+    if cache_marked || tools_marked {
+        mapping.dropped(
+            "/**/cache_control",
+            "OpenAI caches prompts on its own and has no breakpoint to place",
+        );
+    }
+
+    if let Some(choice) = source.get("tool_choice") {
+        let (converted, parallel) = convert_tool_choice(choice)?;
+        out.insert("tool_choice".into(), converted);
+        if let Some(parallel) = parallel {
+            out.insert("parallel_tool_calls".into(), json!(parallel));
+        }
+        mapping.moved();
+    }
+
+    apply_reasoning(&source, &mut out, &mut mapping)?;
+
+    for field in ["temperature", "top_p", "stream"] {
+        if let Some(value) = source.get(field) {
+            out.insert(field.into(), value.clone());
+            mapping.moved();
+        }
+    }
+    for (field, why) in [
+        ("top_k", "OpenAI Responses has no top_k"),
+        (
+            "stop_sequences",
+            "OpenAI Responses has no stop sequences, so the model will not stop at them",
+        ),
+        (
+            "metadata",
+            "OpenAI Responses has no field that means what Anthropic's metadata means",
+        ),
+    ] {
+        if source.get(field).is_some() {
+            mapping.dropped(format!("/{field}"), why);
+        }
+    }
+
+    out.insert("store".into(), json!(false));
+    mapping.added(
+        "/store",
+        "the gateway holds the conversation, so the provider is asked not to keep it",
+    );
+    out.insert("include".into(), json!(["reasoning.encrypted_content"]));
+    mapping.added(
+        "/include",
+        "reasoning has to come back encrypted so the next turn can carry it",
+    );
+
+    mapping.mind_the_rest(&source, CARRIED, WIRE);
+
+    Ok(Translated {
+        body: serde_json::to_vec(&Value::Object(out))?,
+        mapping,
+    })
+}
+
+struct Converting<'a> {
+    target: &'a RequestTarget,
+    envelopes: &'a Envelopes,
+    items: Vec<Value>,
+    mapping: &'a mut Mapping,
+    cache_marked: bool,
+}
+
+impl Converting<'_> {
+    fn message(&mut self, message: &Value, index: usize) -> Result<(), TranslateError> {
+        let at = |suffix: &str| format!("/messages/{index}{suffix}");
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("user");
+        let speaker = match role {
+            "assistant" => "assistant",
+            "system" => "developer",
+            _ => "user",
+        };
+
+        let blocks = match message.get("content") {
+            Some(Value::String(text)) => vec![json!({ "type": "text", "text": text })],
+            Some(Value::Array(blocks)) => blocks.clone(),
+            Some(Value::Null) | None => Vec::new(),
+            Some(other) => {
+                return Err(TranslateError::Malformed {
+                    what: at("/content"),
+                    detail: format!("expected a string or an array, found {other}"),
+                });
+            }
+        };
+
+        let mut parts = Vec::new();
+        for (position, block) in blocks.iter().enumerate() {
+            let here = at(&format!("/content/{position}"));
+            if marked(block) {
+                self.cache_marked = true;
+            }
+            let kind = block
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            match kind {
+                "text" => {
+                    let text = block.get("text").and_then(Value::as_str).unwrap_or("");
+                    let part = if speaker == "assistant" {
+                        json!({ "type": "output_text", "text": text })
+                    } else {
+                        json!({ "type": "input_text", "text": text })
+                    };
+                    parts.push(part);
+                }
+                "image" if speaker != "assistant" => parts.push(image_part(block, &here)?),
+                "document" if speaker != "assistant" => parts.push(file_part(block, &here)?),
+                "tool_use" => {
+                    self.flush(speaker, &mut parts);
+                    let arguments = block.get("input").cloned().unwrap_or_else(|| json!({}));
+                    self.items.push(json!({
+                        "type": "function_call",
+                        "call_id": block.get("id").and_then(Value::as_str).unwrap_or_default(),
+                        "name": block.get("name").and_then(Value::as_str).unwrap_or_default(),
+                        "arguments": arguments.to_string(),
+                    }));
+                }
+                "tool_result" => {
+                    self.flush(speaker, &mut parts);
+                    if block.get("is_error").and_then(Value::as_bool) == Some(true) {
+                        self.mapping.dropped(
+                            format!("{here}/is_error"),
+                            "OpenAI has no error flag on a tool result; only its text says so",
+                        );
+                    }
+                    self.items.push(json!({
+                        "type": "function_call_output",
+                        "call_id": block.get("tool_use_id").and_then(Value::as_str).unwrap_or_default(),
+                        "output": tool_output(block.get("content"), &here)?,
+                    }));
+                }
+                "thinking" => {
+                    self.flush(speaker, &mut parts);
+                    self.thinking(block, &here)?;
+                }
+                "redacted_thinking" => {
+                    self.flush(speaker, &mut parts);
+                    self.mapping.dropped(
+                        here,
+                        "redacted thinking is encrypted for Anthropic and OpenAI cannot read it",
+                    );
+                }
+                other => {
+                    return Err(TranslateError::NoCounterpart {
+                        what: format!("a {other:?} block from {role} at {here}"),
+                        wire: WIRE,
+                    });
+                }
+            }
+        }
+        self.flush(speaker, &mut parts);
+        self.mapping.moved();
+        Ok(())
+    }
+
+    fn flush(&mut self, speaker: &str, parts: &mut Vec<Value>) {
+        if parts.is_empty() {
+            return;
+        }
+        self.items.push(json!({
+            "type": "message",
+            "role": speaker,
+            "content": std::mem::take(parts),
+        }));
+    }
+
+    fn thinking(&mut self, block: &Value, here: &str) -> Result<(), TranslateError> {
+        let signature = block.get("signature").and_then(Value::as_str);
+        let Some(blob) = signature.filter(|blob| crate::envelope::is_ours(blob)) else {
+            self.mapping.dropped(
+                here,
+                "thinking signed by Anthropic cannot be verified by OpenAI, and an unsigned copy \
+                 would claim more than it is",
+            );
+            return Ok(());
+        };
+        let sealed = self
+            .envelopes
+            .open_for(blob, &self.target.provenance)
+            .map_err(|error| TranslateError::NoCounterpart {
+                what: format!("{here} ({error})"),
+                wire: WIRE,
+            })?;
+        match sealed.payload {
+            Payload::Reasoning {
+                encrypted_content,
+                summary,
+            } => {
+                let summary: Vec<Value> = summary
+                    .into_iter()
+                    .map(|text| json!({ "type": "summary_text", "text": text }))
+                    .collect();
+                self.items.push(json!({
+                    "type": "reasoning",
+                    "summary": summary,
+                    "encrypted_content": encrypted_content,
+                }));
+            }
+            Payload::Thinking { .. } | Payload::RedactedThinking { .. } => {
+                self.mapping.dropped(
+                    here,
+                    "thinking signed by Anthropic cannot be verified by OpenAI",
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+fn marked(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => map.contains_key("cache_control") || map.values().any(marked),
+        Value::Array(items) => items.iter().any(marked),
+        _ => false,
+    }
+}
+
+fn joined_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|block| block.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        _ => String::new(),
+    }
+}
+
+fn image_part(block: &Value, here: &str) -> Result<Value, TranslateError> {
+    let source = block.get("source").unwrap_or(&Value::Null);
+    match source.get("type").and_then(Value::as_str) {
+        Some("base64") => {
+            let media = source
+                .get("media_type")
+                .and_then(Value::as_str)
+                .unwrap_or("image/png");
+            let data = source.get("data").and_then(Value::as_str).unwrap_or("");
+            Ok(json!({ "type": "input_image", "image_url": format!("data:{media};base64,{data}") }))
+        }
+        Some("url") => Ok(json!({
+            "type": "input_image",
+            "image_url": source.get("url").and_then(Value::as_str).unwrap_or(""),
+        })),
+        other => Err(TranslateError::NoCounterpart {
+            what: format!("an image whose source is {other:?} at {here}"),
+            wire: WIRE,
+        }),
+    }
+}
+
+fn file_part(block: &Value, here: &str) -> Result<Value, TranslateError> {
+    let source = block.get("source").unwrap_or(&Value::Null);
+    match source.get("type").and_then(Value::as_str) {
+        Some("base64") => {
+            let media = source
+                .get("media_type")
+                .and_then(Value::as_str)
+                .unwrap_or("application/pdf");
+            let data = source.get("data").and_then(Value::as_str).unwrap_or("");
+            let name = block
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("document");
+            Ok(json!({
+                "type": "input_file",
+                "filename": name,
+                "file_data": format!("data:{media};base64,{data}"),
+            }))
+        }
+        Some("text") => Ok(json!({
+            "type": "input_text",
+            "text": source.get("data").and_then(Value::as_str).unwrap_or(""),
+        })),
+        other => Err(TranslateError::NoCounterpart {
+            what: format!("a document whose source is {other:?} at {here}"),
+            wire: WIRE,
+        }),
+    }
+}
+
+fn tool_output(content: Option<&Value>, here: &str) -> Result<Value, TranslateError> {
+    let blocks = match content {
+        None | Some(Value::Null) => return Ok(json!("")),
+        Some(Value::String(text)) => return Ok(json!(text)),
+        Some(Value::Array(blocks)) => blocks,
+        Some(other) => return Ok(json!(other.to_string())),
+    };
+    let only_text = blocks
+        .iter()
+        .all(|block| block.get("type").and_then(Value::as_str) == Some("text"));
+    if only_text {
+        return Ok(json!(joined_text(&Value::Array(blocks.clone()))));
+    }
+    let mut parts = Vec::with_capacity(blocks.len());
+    for (position, block) in blocks.iter().enumerate() {
+        let at = format!("{here}/content/{position}");
+        match block.get("type").and_then(Value::as_str) {
+            Some("text") => parts.push(json!({
+                "type": "input_text",
+                "text": block.get("text").and_then(Value::as_str).unwrap_or(""),
+            })),
+            Some("image") => parts.push(image_part(block, &at)?),
+            Some("document") => parts.push(file_part(block, &at)?),
+            other => {
+                return Err(TranslateError::NoCounterpart {
+                    what: format!("a {other:?} block inside a tool result at {at}"),
+                    wire: WIRE,
+                });
+            }
+        }
+    }
+    Ok(Value::Array(parts))
+}
+
+fn convert_tools(
+    tools: &Value,
+    mapping: &mut Mapping,
+    marked_any: &mut bool,
+) -> Result<Vec<Value>, TranslateError> {
+    let Value::Array(tools) = tools else {
+        return Err(TranslateError::Malformed {
+            what: "/tools".into(),
+            detail: "expected an array".into(),
+        });
+    };
+    const UNDERSTOOD: &[&str] = &[
+        "type",
+        "name",
+        "description",
+        "input_schema",
+        "cache_control",
+    ];
+
+    let mut out = Vec::with_capacity(tools.len());
+    for (index, tool) in tools.iter().enumerate() {
+        if marked(tool) {
+            *marked_any = true;
+        }
+        let kind = tool.get("type").and_then(Value::as_str).unwrap_or("custom");
+        match kind {
+            "custom" => {
+                out.push(json!({
+                    "type": "function",
+                    "name": tool.get("name").and_then(Value::as_str).unwrap_or_default(),
+                    "description": tool.get("description").and_then(Value::as_str).unwrap_or_default(),
+                    "parameters": tool.get("input_schema").cloned().unwrap_or_else(|| json!({ "type": "object" })),
+                    "strict": false,
+                }));
+                if let Some(fields) = tool.as_object() {
+                    for name in fields
+                        .keys()
+                        .filter(|name| !UNDERSTOOD.contains(&name.as_str()))
+                    {
+                        mapping.dropped(
+                            format!("/tools/{index}/{name}"),
+                            format!("OpenAI function tools have no {name}"),
+                        );
+                    }
+                }
+                mapping.moved();
+            }
+            web if web.starts_with("web_search_") => {
+                out.push(json!({ "type": "web_search" }));
+                mapping.moved();
+            }
+            other => {
+                return Err(TranslateError::NoCounterpart {
+                    what: format!("tool type {other:?} at /tools/{index}"),
+                    wire: WIRE,
+                });
+            }
+        }
+    }
+    if !out.is_empty() {
+        mapping.added(
+            "/tools/*/strict",
+            "OpenAI holds function arguments to a strict schema unless told otherwise; \
+             Anthropic does not, so strict is turned off",
+        );
+    }
+    Ok(out)
+}
+
+fn convert_tool_choice(choice: &Value) -> Result<(Value, Option<bool>), TranslateError> {
+    let kind = choice.get("type").and_then(Value::as_str).unwrap_or("auto");
+    let converted = match kind {
+        "auto" => json!("auto"),
+        "any" => json!("required"),
+        "none" => json!("none"),
+        "tool" => json!({
+            "type": "function",
+            "name": choice.get("name").and_then(Value::as_str).unwrap_or_default(),
+        }),
+        other => {
+            return Err(TranslateError::NoCounterpart {
+                what: format!("tool_choice {other:?}"),
+                wire: WIRE,
+            });
+        }
+    };
+    let parallel = choice
+        .get("disable_parallel_tool_use")
+        .and_then(Value::as_bool)
+        .map(|disabled| !disabled);
+    Ok((converted, parallel))
+}
+
+fn apply_reasoning(
+    source: &Value,
+    out: &mut Map<String, Value>,
+    mapping: &mut Mapping,
+) -> Result<(), TranslateError> {
+    let thinking = source.get("thinking");
+    let config = source.get("output_config");
+    let kind = thinking
+        .and_then(|thinking| thinking.get("type"))
+        .and_then(Value::as_str);
+
+    if kind == Some("disabled") {
+        mapping.dropped(
+            "/thinking",
+            "OpenAI reasoning models decide for themselves whether to reason; it cannot be turned off",
+        );
+    }
+
+    let asked_effort = config
+        .and_then(|config| config.get("effort"))
+        .and_then(Value::as_str);
+    let budget_effort = thinking
+        .and_then(|thinking| thinking.get("budget_tokens"))
+        .and_then(Value::as_u64)
+        .map(|budget| match budget {
+            0..4_096 => "low",
+            4_096..16_384 => "medium",
+            _ => "high",
+        });
+    let effort = match asked_effort.or(budget_effort) {
+        Some("xhigh" | "max") => {
+            mapping.dropped(
+                "/output_config/effort",
+                "OpenAI has no effort above high; high was sent",
+            );
+            Some("high")
+        }
+        other => other,
+    };
+
+    if matches!(kind, Some("adaptive" | "enabled")) || effort.is_some() {
+        let mut reasoning = json!({ "summary": "auto" });
+        if let Some(effort) = effort {
+            reasoning["effort"] = json!(effort);
+        }
+        out.insert("reasoning".into(), reasoning);
+        mapping.added(
+            "/reasoning/summary",
+            "asked for reasoning summaries so the client receives thinking as it happens",
+        );
+        mapping.moved();
+    }
+
+    if let Some(Value::Object(config)) = config {
+        for (name, value) in config {
+            match name.as_str() {
+                "effort" => {}
+                "format" => {
+                    let mut format = value.clone();
+                    if format.get("name").is_none() {
+                        format["name"] = json!("output");
+                        mapping.added(
+                            "/text/format/name",
+                            "OpenAI requires a name for a structured output format",
+                        );
+                    }
+                    out.insert("text".into(), json!({ "format": format }));
+                    mapping.moved();
+                }
+                other => mapping.dropped(
+                    format!("/output_config/{other}"),
+                    format!("OpenAI Responses has no {other}"),
+                ),
+            }
+        }
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone)]
 pub struct StreamTarget {

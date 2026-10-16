@@ -24,6 +24,14 @@ export type Request = {
   byte_identical: boolean | null;
   evidence: unknown;
   upstream_request_id: string | null;
+  user_id: string | null;
+  key_id: string | null;
+  credential: "account" | "carried" | null;
+  attempts: Attempt[] | null;
 };
+
+export type Attempt =
+  | { account: string; status: number; said: string | null }
+  | { carried: string; why: string };
 
 export const STATUSES = ["ok", "error", "in_flight", "abandoned"] as const;

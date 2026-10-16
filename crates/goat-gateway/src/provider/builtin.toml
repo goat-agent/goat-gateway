@@ -4,15 +4,86 @@ key = "x_api_key"
 limits = "headers"
 endpoints = [{ wire = "messages", url = "https://api.anthropic.com/v1/messages" }]
 headers = { "anthropic-version" = "2023-06-01" }
+carried = [
+  { header = "authorization", starts_with = "Bearer sk-ant-oat", hosts = ["api.anthropic.com"] },
+  { header = "authorization", starts_with = "Bearer sk-ant-api", hosts = ["api.anthropic.com"] },
+  { header = "x-api-key", starts_with = "sk-ant-api", hosts = ["api.anthropic.com"] },
+]
+
+[[provider.anthropic.refusals]]
+status = 400
+says = "Third-party apps now draw from your extra usage"
+credential = "oauth"
+demote_minutes = 1440
+
+[[provider.anthropic.refusals]]
+status = 400
+says = "only authorized for use with Claude Code"
+credential = "oauth"
+demote_minutes = 1440
+
+[[provider.anthropic.refusals]]
+status = 429
+message = "Error"
+credential = "oauth"
+demote_minutes = 60
+
+[provider.anthropic.sign_in]
+label = "Claude Pro/Max"
+client_id = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+authorize_url = "https://claude.ai/oauth/authorize"
+token_url = "https://platform.claude.com/v1/oauth/token"
+scopes = "org:create_api_key user:profile user:inference"
+body = "json"
+state = "verifier"
+sends_state = true
+extra = { code = "true" }
+loopback = { host = "localhost", port = 54545, path = "/callback" }
+paste = "https://platform.claude.com/oauth/code/callback"
+merge_beta = "oauth-2025-04-20"
+
+[[provider.anthropic.models]]
+name = "claude-opus-5-5"
+limit_scope = "opus"
+thinking = "adaptive"
+max_tokens = 32000
+cache_min_tokens = 512
+mid_conversation_system = true
+price = { input = 4000000, output = 20000000, cache_read = 200000, cache_write = 5000000 }
+
+[[provider.anthropic.models]]
+name = "claude-sonnet-5-5"
+limit_scope = "sonnet"
+thinking = "adaptive"
+max_tokens = 32000
+cache_min_tokens = 512
+mid_conversation_system = true
+price = { input = 2000000, output = 10000000, cache_read = 200000, cache_write = 2500000 }
+
+[[provider.anthropic.models]]
+name = "claude-haiku-5-5"
+thinking = "adaptive"
+max_tokens = 32000
+cache_min_tokens = 512
+mid_conversation_system = true
+
+[[provider.anthropic.models]]
+name = "claude-fable-5-1"
+limit_scope = "fable"
+thinking = "adaptive"
+max_tokens = 32000
+cache_min_tokens = 512
+mid_conversation_system = true
+price = { input = 10000000, output = 50000000, cache_read = 250000, cache_write = 12500000 }
 
 [[provider.anthropic.models]]
 name = "claude-opus-5"
 limit_scope = "opus"
 thinking = "adaptive"
 max_tokens = 32000
-cache_min_tokens = 1024
+cache_min_tokens = 512
 mid_conversation_system = true
-price = { input = 15000000, output = 75000000, cache_read = 1500000, cache_write = 18750000 }
+price = { input = 5000000, output = 25000000, cache_read = 500000, cache_write = 6250000 }
 
 [[provider.anthropic.models]]
 name = "claude-sonnet-5"
@@ -21,15 +92,16 @@ thinking = "adaptive"
 max_tokens = 32000
 cache_min_tokens = 1024
 mid_conversation_system = false
-price = { input = 3000000, output = 15000000, cache_read = 300000, cache_write = 3750000 }
+price = { input = 2000000, output = 10000000, cache_read = 200000, cache_write = 2500000 }
 
 [[provider.anthropic.models]]
 name = "claude-fable-5"
 limit_scope = "fable"
 thinking = "adaptive"
 max_tokens = 32000
-cache_min_tokens = 1024
+cache_min_tokens = 512
 mid_conversation_system = true
+price = { input = 10000000, output = 50000000, cache_read = 1000000, cache_write = 12500000 }
 
 [[provider.anthropic.models]]
 name = "claude-opus-4-8"
@@ -38,12 +110,13 @@ thinking = "adaptive"
 max_tokens = 32000
 cache_min_tokens = 1024
 mid_conversation_system = true
+price = { input = 5000000, output = 25000000, cache_read = 500000, cache_write = 6250000 }
 
 [[provider.anthropic.models]]
 name = "claude-haiku-4-5"
 thinking = "budget"
 max_tokens = 8192
-cache_min_tokens = 2048
+cache_min_tokens = 4096
 mid_conversation_system = false
 price = { input = 1000000, output = 5000000, cache_read = 100000, cache_write = 1250000 }
 
@@ -54,12 +127,75 @@ endpoints = [
   { wire = "responses", url = "https://api.openai.com/v1/responses" },
   { wire = "chat", url = "https://api.openai.com/v1/chat/completions" },
 ]
+carried = [{ header = "authorization", starts_with = "Bearer sk-", hosts = ["api.openai.com"] }]
 
 [[provider.openai.models]]
 name = "gpt-5"
 
 [[provider.openai.models]]
 name = "gpt-5-codex"
+
+[provider.chatgpt]
+label = "ChatGPT via Codex"
+limits = "headers"
+api_key = false
+carried = [
+  { header = "authorization", starts_with = "Bearer ", alongside = "chatgpt-account-id", hosts = ["chatgpt.com"] },
+]
+
+[[provider.chatgpt.endpoints]]
+wire = "responses"
+url = "https://chatgpt.com/backend-api/codex/responses"
+refuses = ["max_output_tokens", "temperature", "top_p"]
+
+[provider.chatgpt.endpoints.knock]
+instructions = "Reply with one word."
+input = [{ type = "message", role = "user", content = [{ type = "input_text", text = "." }] }]
+stream = true
+store = false
+
+[provider.chatgpt.sign_in]
+label = "ChatGPT Plus/Pro, through Codex"
+client_id = "app_EMoamEEZ73f0CkXaXp7hrann"
+authorize_url = "https://auth.openai.com/oauth/authorize"
+token_url = "https://auth.openai.com/oauth/token"
+scopes = "openid profile email offline_access"
+body = "form"
+refresh_body = "json"
+extra = { id_token_add_organizations = "true", codex_cli_simplified_flow = "true" }
+loopback = { host = "127.0.0.1", port = 1455, fallback_port = 1457, path = "/auth/callback" }
+device = { user_code_url = "https://auth.openai.com/api/accounts/deviceauth/usercode", poll_url = "https://auth.openai.com/api/accounts/deviceauth/token", verification_url = "https://auth.openai.com/codex/device", redirect_uri = "https://auth.openai.com/deviceauth/callback" }
+identity = { claims = [["chatgpt_account_id"], ["https://api.openai.com/auth", "chatgpt_account_id"]], header = "chatgpt-account-id" }
+
+[[provider.chatgpt.models]]
+name = "gpt-5"
+
+[[provider.chatgpt.models]]
+name = "gpt-5-codex"
+
+[provider.chatgpt_signin]
+label = "ChatGPT"
+limits = "headers"
+api_key = false
+check = "https://api.openai.com/v1/models"
+
+[[provider.chatgpt_signin.endpoints]]
+wire = "responses"
+url = "https://api.openai.com/v1/responses"
+
+[provider.chatgpt_signin.sign_in]
+label = "Sign in with ChatGPT"
+client_id = "dynamic_agent_client"
+issues_client = true
+authorize_url = "https://auth.openai.com/api/accounts/authorize"
+token_url = "https://auth.openai.com/api/accounts/oauth/token"
+scopes = "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct"
+must_grant = ["chatgpt.tokens.use.direct"]
+body = "form"
+extra = { resource = "https://api.openai.com/v1", ext_agent_host_id = "{install}", agent_name_hint = "goat gateway", nonce = "{nonce}" }
+first_only = ["agent_name_hint"]
+token_extra = { resource = "https://api.openai.com/v1" }
+loopback = { host = "127.0.0.1", port = 1455, fallback_port = 1457, path = "/auth/callback" }
 
 [provider.zai]
 label = "Z.ai GLM Coding Plan"
@@ -80,6 +216,7 @@ name = "glm-4.5-air"
 label = "Kimi Coding Plan"
 limits = { endpoint = { url = "https://api.kimi.com/coding/v1/usages" } }
 endpoints = [{ wire = "chat", url = "https://api.kimi.com/coding/v1/chat/completions" }]
+refusals = [{ status = 403, says = "access_terminated_error", demote_minutes = 1440 }]
 
 [[provider.kimi.models]]
 name = "kimi-for-coding"

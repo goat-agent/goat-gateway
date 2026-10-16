@@ -454,6 +454,7 @@ pub struct StreamTranslator {
     speaking: Option<Speaking>,
     calls: usize,
     finish_reason: Option<&'static str>,
+    stopped: bool,
     usage: Option<Value>,
     spoken: String,
     thought: String,
@@ -470,6 +471,7 @@ impl StreamTranslator {
             speaking: None,
             calls: 0,
             finish_reason: None,
+            stopped: false,
             usage: None,
             spoken: String::new(),
             thought: String::new(),
@@ -487,6 +489,14 @@ impl StreamTranslator {
 
     pub fn finish(&mut self) -> Vec<u8> {
         let mut out = String::new();
+        if !self.finished && !self.stopped {
+            self.finished = true;
+            out.push_str(&format!(
+                "data: {}\n\n",
+                json!({ "error": { "type": "api_error", "message": "the provider's stream ended before it said the response was complete" } })
+            ));
+            return out.into_bytes();
+        }
         if self.opened && !self.finished {
             self.finished = true;
             out.push_str(&self.chunk(json!({}), self.finish_reason.or(Some("stop"))));
@@ -551,6 +561,7 @@ impl StreamTranslator {
                     .and_then(|delta| delta.get("stop_reason"))
                     .and_then(Value::as_str)
                 {
+                    self.stopped = true;
                     self.finish_reason = Some(match reason {
                         "max_tokens" => "length",
                         "tool_use" => "tool_calls",
@@ -560,6 +571,7 @@ impl StreamTranslator {
                 }
                 self.note_usage(event.get("usage"));
             }
+            "message_stop" => self.stopped = true,
             "error" => {
                 self.finished = true;
                 out.push_str(&format!(
@@ -895,6 +907,32 @@ mod stream_tests {
         assert_eq!(counted["usage"]["completion_tokens"], 42);
         assert_eq!(counted["usage"]["total_tokens"], 1042);
         assert_eq!(translator.assembled()["usage"]["total_tokens"], 1042);
+    }
+
+    #[test]
+    fn a_stream_cut_off_before_it_stopped_says_so() {
+        let text = anthropic(&[
+            (
+                "message_start",
+                json!({ "type": "message_start", "message": {} }),
+            ),
+            (
+                "content_block_start",
+                json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "text", "text": "" } }),
+            ),
+            (
+                "content_block_delta",
+                json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "text_delta", "text": "Half" } }),
+            ),
+        ]);
+
+        let (frames, _) = run(&text);
+        let raw: String = frames.iter().map(|frame| frame.data.clone()).collect();
+        assert!(raw.contains("\"error\""), "{raw}");
+        assert!(
+            !raw.contains("[DONE]"),
+            "ending quietly would make a broken answer look finished"
+        );
     }
 
     #[test]

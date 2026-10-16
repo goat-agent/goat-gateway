@@ -33,6 +33,15 @@ async function posted(path: string, body: unknown) {
   return response;
 }
 
+export async function place(path: string, body: unknown): Promise<void> {
+  const response = await fetch(path, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  await checked(response);
+}
+
 export async function drop(path: string): Promise<void> {
   const response = await fetch(path, { method: "DELETE" });
   await checked(response);

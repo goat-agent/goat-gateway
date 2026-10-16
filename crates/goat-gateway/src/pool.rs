@@ -1,6 +1,6 @@
 use crate::{
     limits::Snapshot,
-    store::{AccountState, Store, StoreError, now},
+    store::{AccountRow, AccountState, Store, StoreError, now},
 };
 
 #[derive(Debug, Clone)]
@@ -31,6 +31,8 @@ pub struct Want<'a> {
     pub scope: Option<&'a str>,
     pub pinned: Option<&'a str>,
     pub prefer: Option<&'a str>,
+    pub person: Option<&'a str>,
+    pub key: Option<&'a str>,
 }
 
 impl<'a> Want<'a> {
@@ -42,34 +44,57 @@ impl<'a> Want<'a> {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct Candidate {
+    pub name: String,
+    pub credential_kind: String,
+}
+
 pub fn pick(store: &Store, want: &Want<'_>) -> Result<Chosen, PoolError> {
+    let first =
+        candidates(store, want)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| PoolError::NoneRegistered {
+                provider: want.provider.to_owned(),
+            })?;
+    load(store, &first.name)
+}
+
+pub fn candidates(store: &Store, want: &Want<'_>) -> Result<Vec<Candidate>, PoolError> {
     let Want {
         provider,
         scope,
         pinned,
         prefer,
+        person,
+        key,
     } = *want;
 
     store.clear_expired_cooldowns()?;
     let accounts = store.accounts()?;
+    let visible = |owner: &Option<String>| match (owner, person) {
+        (None, _) | (_, None) => true,
+        (Some(owner), Some(person)) => owner == person,
+    };
 
-    let candidates: Vec<_> = accounts
+    let reachable: Vec<_> = accounts
         .iter()
-        .filter(|account| account.provider == provider)
+        .filter(|account| account.provider == provider && visible(&account.owner))
         .collect();
-    if candidates.is_empty() {
+    if reachable.is_empty() {
         return Err(PoolError::NoneRegistered {
             provider: provider.to_owned(),
         });
     }
 
     if let Some(pinned) = pinned {
-        let account = candidates
+        let account = reachable
             .iter()
             .find(|account| account.name == pinned)
             .ok_or_else(|| PoolError::PinUnavailable {
                 pinned: pinned.to_owned(),
-                state: "no longer registered".to_owned(),
+                state: "not one of the accounts this key can use".to_owned(),
             })?;
         if account.state != AccountState::Active {
             return Err(PoolError::PinUnavailable {
@@ -77,29 +102,35 @@ pub fn pick(store: &Store, want: &Want<'_>) -> Result<Chosen, PoolError> {
                 state: describe(account.state, account.cooldown_until),
             });
         }
-        return load(store, pinned);
+        return Ok(vec![candidate(account)]);
     }
 
-    let mut usable: Vec<_> = candidates
+    let demoted = match key {
+        Some(key) => store.demotions(key)?,
+        None => Vec::new(),
+    };
+    let kept_off = |name: &str| {
+        demoted
+            .iter()
+            .any(|demotion| demotion.account == name && demotion.until.is_none())
+    };
+    let tried_last = |name: &str| demoted.iter().any(|demotion| demotion.account == name);
+
+    let mut usable: Vec<_> = reachable
         .iter()
-        .filter(|account| account.state == AccountState::Active)
+        .filter(|account| account.state == AccountState::Active && !kept_off(&account.name))
         .collect();
 
-    if let Some(prefer) = prefer
-        && usable.iter().any(|account| account.name == prefer)
-    {
-        return load(store, prefer);
-    }
-
     if usable.is_empty() {
-        let detail = candidates
+        let detail = reachable
             .iter()
             .map(|account| {
-                format!(
-                    "{} is {}",
-                    account.name,
+                let why = if kept_off(&account.name) {
+                    "kept off this key by hand".to_owned()
+                } else {
                     describe(account.state, account.cooldown_until)
-                )
+                };
+                format!("{} is {why}", account.name)
             })
             .collect::<Vec<_>>()
             .join("; ");
@@ -109,25 +140,44 @@ pub fn pick(store: &Store, want: &Want<'_>) -> Result<Chosen, PoolError> {
         });
     }
 
+    let pressure = |name: &str| {
+        store
+            .rate_limits(name)
+            .ok()
+            .flatten()
+            .and_then(|snapshot: Snapshot| snapshot.pressure_for(scope))
+            .unwrap_or(f64::NEG_INFINITY)
+    };
+    let shared = |account: &AccountRow| account.owner.is_none() && person.is_some();
+    let cold = |account: &AccountRow| prefer != Some(account.name.as_str());
+
     usable.sort_by(|a, b| {
-        let pressure = |name: &str| {
-            store
-                .rate_limits(name)
-                .ok()
-                .flatten()
-                .and_then(|snapshot: Snapshot| snapshot.pressure_for(scope))
-                .unwrap_or(f64::NEG_INFINITY)
-        };
-        pressure(&a.name)
-            .partial_cmp(&pressure(&b.name))
-            .unwrap_or(std::cmp::Ordering::Equal)
+        tried_last(&a.name)
+            .cmp(&tried_last(&b.name))
+            .then_with(|| shared(a).cmp(&shared(b)))
+            .then_with(|| cold(a).cmp(&cold(b)))
+            .then_with(|| {
+                pressure(&a.name)
+                    .partial_cmp(&pressure(&b.name))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .then_with(|| a.name.cmp(&b.name))
     });
 
-    load(store, &usable[0].name)
+    Ok(usable
+        .into_iter()
+        .map(|account| candidate(account))
+        .collect())
 }
 
-fn load(store: &Store, name: &str) -> Result<Chosen, PoolError> {
+fn candidate(account: &AccountRow) -> Candidate {
+    Candidate {
+        name: account.name.clone(),
+        credential_kind: account.credential_kind.clone(),
+    }
+}
+
+pub fn load(store: &Store, name: &str) -> Result<Chosen, PoolError> {
     let accounts = store.accounts()?;
     let row = accounts
         .into_iter()
@@ -411,6 +461,125 @@ mod tests {
         assert_eq!(
             pick(&store, &Want::from("anthropic")).unwrap().secret,
             b"sk-live"
+        );
+    }
+
+    fn two_people() -> (Store, String, String, String) {
+        let store = store();
+        let ana = store.add_user("ana").unwrap();
+        let mino = store.add_user("mino").unwrap();
+        let key = store.issue_key(&ana.id, "pi").unwrap();
+        for (name, owner) in [
+            ("Ana Max", Some(ana.id.as_str())),
+            ("Mino Max", Some(mino.id.as_str())),
+            ("Team key", None),
+        ] {
+            store.add_account(name, "anthropic", "oauth", b"x").unwrap();
+            store.set_owner(name, owner).unwrap();
+        }
+        (store, ana.id, mino.id, key.id)
+    }
+
+    fn names(store: &Store, want: &Want<'_>) -> Vec<String> {
+        candidates(store, want)
+            .unwrap()
+            .into_iter()
+            .map(|candidate| candidate.name)
+            .collect()
+    }
+
+    #[test]
+    fn someone_elses_plan_is_never_a_candidate() {
+        let (store, ana, _, key) = two_people();
+        let want = Want {
+            person: Some(&ana),
+            key: Some(&key),
+            ..Want::from("anthropic")
+        };
+        assert_eq!(names(&store, &want), ["Ana Max", "Team key"]);
+    }
+
+    #[test]
+    fn your_own_account_comes_before_the_shared_one() {
+        let (store, ana, _, key) = two_people();
+        store.set_rate_limits("Ana Max", &snapshot(90.0)).unwrap();
+        let want = Want {
+            person: Some(&ana),
+            key: Some(&key),
+            ..Want::from("anthropic")
+        };
+        assert_eq!(
+            names(&store, &want)[0],
+            "Ana Max",
+            "pressure only orders accounts that are equally yours"
+        );
+    }
+
+    #[test]
+    fn a_demoted_account_is_tried_last_and_a_kept_off_one_not_at_all() {
+        let (store, ana, _, key) = two_people();
+        store
+            .demote(&key, "Ana Max", Some(now() + 60_000), "refused")
+            .unwrap();
+        let want = Want {
+            person: Some(&ana),
+            key: Some(&key),
+            ..Want::from("anthropic")
+        };
+        assert_eq!(names(&store, &want), ["Team key", "Ana Max"]);
+
+        store
+            .demote(&key, "Ana Max", None, "kept off by hand")
+            .unwrap();
+        assert_eq!(names(&store, &want), ["Team key"]);
+    }
+
+    #[test]
+    fn a_demotion_on_one_key_leaves_the_owners_other_keys_alone() {
+        let (store, ana, _, key) = two_people();
+        let other = store.issue_key(&ana, "Claude Code").unwrap();
+        store
+            .demote(&key, "Ana Max", Some(now() + 60_000), "refused")
+            .unwrap();
+        let want = Want {
+            person: Some(&ana),
+            key: Some(&other.id),
+            ..Want::from("anthropic")
+        };
+        assert_eq!(names(&store, &want)[0], "Ana Max");
+    }
+
+    #[test]
+    fn a_pin_to_an_account_you_cannot_see_is_refused() {
+        let (store, ana, _, key) = two_people();
+        let want = Want {
+            person: Some(&ana),
+            key: Some(&key),
+            pinned: Some("Mino Max"),
+            ..Want::from("anthropic")
+        };
+        assert!(matches!(
+            candidates(&store, &want),
+            Err(PoolError::PinUnavailable { .. })
+        ));
+    }
+
+    #[test]
+    fn a_pin_outranks_a_demotion() {
+        let (store, ana, _, key) = two_people();
+        store
+            .demote(&key, "Ana Max", Some(now() + 60_000), "refused")
+            .unwrap();
+        let want = Want {
+            person: Some(&ana),
+            key: Some(&key),
+            pinned: Some("Ana Max"),
+            ..Want::from("anthropic")
+        };
+        assert_eq!(
+            names(&store, &want),
+            ["Ana Max"],
+            "reasoning state belongs to one account; moving it is an error, not a fallback"
         );
     }
 }

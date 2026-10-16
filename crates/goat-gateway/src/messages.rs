@@ -11,6 +11,15 @@ pub async fn handle(
     serve::dispatch(app, caller, headers, body, Wire::Messages).await
 }
 
+pub async fn count_tokens(
+    State(app): State<App>,
+    Extension(caller): Extension<crate::store::Caller>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    serve::count_tokens(app, caller, headers, body).await
+}
+
 pub(crate) fn client_name(headers: &HeaderMap) -> Option<String> {
     let agent = headers.get("user-agent")?.to_str().ok()?;
     Some(match agent {

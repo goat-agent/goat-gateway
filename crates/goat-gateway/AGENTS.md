@@ -32,12 +32,31 @@ credentials — then either passes it through or walks a translation path.
 - A model belongs to the provider that declares it.
 - A model nobody declares goes to the one registered provider that speaks the arriving format.
   Speaking it natively beats reaching it by translation; that is what keeps a mixed pool
-  unambiguous. Two candidates is an error naming both, not a coin toss.
+  unambiguous.
+- When several providers remain, the one whose login the client carried wins, then one the
+  caller owns an account with. Past that, two candidates is an error naming both, not a coin
+  toss.
 - Passthrough is not a flag. It is what happens when `route.endpoint.wire == incoming.wire`.
+
+## Who is asking
+
+- A gateway key (`gwk_`) names a person. It may arrive as the bearer or in `x-gateway-key`.
+- When it arrives in `x-gateway-key`, the client's own `authorization` or `x-api-key` is a
+  **carried** login. It is matched against the providers' `carried` declarations, sent only to
+  the hosts declared there, never stored, and refused with a 401 if nobody declared it.
+- The console signs people in with sessions (`gws_`, hashed in `sessions`). The admin key opens
+  a session that answers for everyone until it is claimed by a person.
 
 ## Choosing an account
 
-`pool::pick` takes a `Want`.
+`pool::candidates` takes a `Want` and returns them in order; `pool::pick` is the first.
+
+- Only accounts the caller owns or that are shared with everyone are candidates.
+- Order: a pin, then accounts this key has not been demoted on, then the caller's own, then the
+  one that served this conversation for this person, then the least quota pressure.
+- A declared refusal (`[[provider.x.refusals]]`) demotes the key on that account for a while and
+  never parks the account. If no byte has reached the client, the request goes once more to the
+  next candidate. One request is one row; earlier attempts are kept in `attempts`.
 
 - A **pin** must be honoured or the request fails. Reasoning state and turn state belong to one
   account; sending them elsewhere is an error, not a worse answer.

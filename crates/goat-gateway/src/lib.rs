@@ -1,9 +1,12 @@
 pub mod api;
 pub mod auth;
 pub mod chat;
+pub mod config;
+pub mod discover;
 pub mod events;
 pub mod limits;
 pub mod messages;
+pub mod models;
 pub mod oauth;
 pub mod pool;
 pub mod pricing;
@@ -25,7 +28,7 @@ use axum::{
     Router,
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::post,
+    routing::{get, post},
 };
 use goat_gateway_wire::Envelopes;
 
@@ -38,9 +41,12 @@ pub struct App {
 
 pub(crate) struct Inner {
     pub(crate) client: reqwest::Client,
+    pub(crate) oauth: oauth::Client,
     pub(crate) store: Store,
     pub(crate) envelopes: Envelopes,
-    pub(crate) catalog: crate::provider::Catalog,
+    pub(crate) catalog: std::sync::RwLock<Arc<crate::provider::Catalog>>,
+    pub(crate) config: Option<std::path::PathBuf>,
+    pub(crate) ping_every: std::time::Duration,
     pub(crate) sessions: oauth::Sessions,
     pub(crate) announcer: events::Announcer,
     pub(crate) turns: turns::Turns,
@@ -49,12 +55,16 @@ pub(crate) struct Inner {
 
 impl App {
     pub fn new(store: Store, envelope_key: [u8; 32], catalog: crate::provider::Catalog) -> Self {
+        let client = reqwest::Client::new();
         Self {
             inner: Arc::new(Inner {
-                client: reqwest::Client::new(),
+                oauth: oauth::Client::with_http(client.clone()),
+                client,
                 store,
                 envelopes: Envelopes::new(&envelope_key),
-                catalog,
+                catalog: std::sync::RwLock::new(Arc::new(catalog)),
+                config: None,
+                ping_every: std::time::Duration::from_secs(15),
                 sessions: oauth::Sessions::default(),
                 announcer: events::Announcer::default(),
                 turns: turns::Turns::default(),
@@ -75,8 +85,30 @@ impl App {
         &self.inner.announcer
     }
 
-    pub fn catalog(&self) -> &crate::provider::Catalog {
-        &self.inner.catalog
+    pub fn pinging_every(mut self, every: std::time::Duration) -> Self {
+        if let Some(inner) = Arc::get_mut(&mut self.inner) {
+            inner.ping_every = every;
+        }
+        self
+    }
+
+    pub fn reading(mut self, config: std::path::PathBuf) -> Self {
+        if let Some(inner) = Arc::get_mut(&mut self.inner) {
+            inner.config = Some(config);
+        }
+        self
+    }
+
+    pub fn catalog(&self) -> Arc<crate::provider::Catalog> {
+        self.inner.catalog.read().expect("catalog lock").clone()
+    }
+
+    pub(crate) fn config_path(&self) -> Option<&std::path::Path> {
+        self.inner.config.as_deref()
+    }
+
+    pub(crate) fn replace_catalog(&self, catalog: crate::provider::Catalog) {
+        *self.inner.catalog.write().expect("catalog lock") = Arc::new(catalog);
     }
 
     pub(crate) fn sessions(&self) -> &oauth::Sessions {
@@ -84,36 +116,53 @@ impl App {
     }
 
     pub(crate) fn oauth_client(&self) -> oauth::Client {
-        oauth::Client::with_http(self.inner.client.clone())
+        self.inner.oauth.clone()
     }
 
     pub fn router(self) -> Router {
-        let gateway = Router::new()
-            .route("/v1/messages", post(messages::handle))
-            .route("/v1/responses", post(responses::handle))
-            .route("/v1/chat/completions", post(chat::handle))
-            .route_layer(axum::middleware::from_fn_with_state(
-                self.clone(),
-                auth::gateway,
-            ));
+        let mut gateway = Router::new();
+        for base in ["", "/v1", "/v1/v1"] {
+            gateway = gateway
+                .route(&format!("{base}/messages"), post(messages::handle))
+                .route(
+                    &format!("{base}/messages/count_tokens"),
+                    post(messages::count_tokens),
+                )
+                .route(&format!("{base}/responses"), post(responses::handle))
+                .route(&format!("{base}/chat/completions"), post(chat::handle))
+                .route(&format!("{base}/models"), get(models::offered));
+        }
+        let gateway = gateway.route_layer(axum::middleware::from_fn_with_state(
+            self.clone(),
+            auth::gateway,
+        ));
 
-        let admin = api::router()
-            .route("/api/events", axum::routing::get(events::stream))
+        let admins_only =
+            api::admin_router().route_layer(axum::middleware::from_fn(auth::admins_only));
+        let console = api::router()
+            .merge(admins_only)
+            .route("/api/events", get(events::stream))
             .route_layer(axum::middleware::from_fn_with_state(
                 self.clone(),
-                auth::admin,
+                auth::console,
             ));
 
         Router::new()
             .merge(gateway)
-            .merge(admin)
+            .merge(console)
             .merge(api::open_router())
             .merge(web::router())
             .with_state(self)
     }
 }
 
-pub(crate) async fn relay_failure(response: reqwest::Response) -> (Response, Option<String>) {
+pub(crate) struct Failure {
+    pub relayed: Response,
+    pub said: Option<String>,
+    pub body: String,
+}
+
+pub(crate) async fn relay_failure(response: reqwest::Response) -> Failure {
     let status =
         StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let mut builder = Response::builder().status(status);
@@ -128,10 +177,15 @@ pub(crate) async fn relay_failure(response: reqwest::Response) -> (Response, Opt
 
     let body = response.bytes().await.unwrap_or_default();
     let said = complaint(&body);
+    let text = String::from_utf8_lossy(&body).into_owned();
     let relayed = builder
         .body(axum::body::Body::from(body))
         .unwrap_or_else(|error| gateway_error(format!("could not relay response: {error}")));
-    (relayed, said)
+    Failure {
+        relayed,
+        said,
+        body: text,
+    }
 }
 
 fn complaint(body: &[u8]) -> Option<String> {
@@ -263,13 +317,17 @@ pub(crate) fn anthropic_error(status: StatusCode, kind: &str, message: String) -
 
 pub fn load_catalog(dir: &std::path::Path) -> Result<provider::Catalog, provider::CatalogError> {
     let path = dir.join("config.toml");
-    let catalog = match std::fs::read_to_string(&path) {
-        Ok(overlay) => {
-            let catalog = provider::Catalog::with_overlay(&overlay)?;
-            tracing::info!(path = %path.display(), "loaded provider overrides");
-            catalog
-        }
-        Err(_) => provider::Catalog::builtin(),
+    let overlay = std::fs::read_to_string(&path).ok();
+    if overlay.is_some() {
+        tracing::info!(path = %path.display(), "loaded provider overrides");
+    }
+    catalog_from(overlay.as_deref())
+}
+
+pub fn catalog_from(overlay: Option<&str>) -> Result<provider::Catalog, provider::CatalogError> {
+    let catalog = match overlay {
+        Some(overlay) => provider::Catalog::with_overlay(overlay)?,
+        None => provider::Catalog::builtin(),
     };
     Ok(match std::env::var("GOAT_ANTHROPIC_BASE_URL") {
         Ok(base) if !base.is_empty() => catalog.with_base_url("anthropic", &base),
@@ -293,6 +351,15 @@ pub(crate) fn request_id() -> String {
 }
 
 pub(crate) fn observe(app: &App, account: &str, status: u16, headers: &axum::http::HeaderMap) {
+    let snapshot = observe_limits(app, account, headers);
+    judge(app, account, status, headers, &snapshot);
+}
+
+pub(crate) fn observe_limits(
+    app: &App,
+    account: &str,
+    headers: &axum::http::HeaderMap,
+) -> limits::Snapshot {
     app.turns().minted(headers, account);
     let snapshot = limits::parse(headers, store::now());
     if !snapshot.is_empty() {
@@ -301,8 +368,17 @@ pub(crate) fn observe(app: &App, account: &str, status: u16, headers: &axum::htt
             account: account.to_owned(),
         });
     }
+    snapshot
+}
 
-    let moved_to = match limits::classify(status, headers, &snapshot) {
+pub(crate) fn judge(
+    app: &App,
+    account: &str,
+    status: u16,
+    headers: &axum::http::HeaderMap,
+    snapshot: &limits::Snapshot,
+) {
+    let moved_to = match limits::classify(status, headers, snapshot) {
         limits::Verdict::Exhausted { until } => {
             Some((store::AccountState::RateLimited, Some(until)))
         }

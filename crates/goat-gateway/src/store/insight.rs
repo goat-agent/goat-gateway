@@ -17,6 +17,7 @@ pub struct Filter {
     pub conversation: Option<String>,
     pub status: Option<String>,
     pub search: Option<String>,
+    pub user_id: Option<String>,
 }
 
 impl Filter {
@@ -33,6 +34,7 @@ impl Filter {
             conversation: text("conversation"),
             status: text("status"),
             search: text("search"),
+            user_id: None,
         }
     }
 
@@ -60,6 +62,7 @@ impl Filter {
         equals("client", &self.client);
         equals("conversation", &self.conversation);
         equals("status", &self.status);
+        equals("user_id", &self.user_id);
 
         if let Some(since) = self.since {
             clauses.push("started_at >= ?".to_owned());
@@ -382,6 +385,7 @@ mod tests {
             byte_identical: Some(true),
             evidence: None,
             upstream_request_id: None,
+            ..RequestRow::default()
         }
     }
 

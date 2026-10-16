@@ -1,6 +1,6 @@
 use axum::{
     body::{Body, Bytes},
-    http::{HeaderValue, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
 use futures_util::StreamExt as _;
@@ -13,11 +13,13 @@ use crate::{
     gateway_error,
     provider::Wire,
     relay_path::{Ask, Back, Hop},
-    serve::{self, Incoming, Ready},
-    store::now,
+    serve::{self, Incoming, Outcome, Ready},
+    store::{RequestRow, now},
 };
 
-pub(crate) async fn run(incoming: Incoming, ready: Ready, hops: &'static [Hop]) -> Response {
+const KEPT_OF_AN_UNREADABLE_ANSWER: usize = 2000;
+
+pub(crate) async fn run(incoming: &Incoming, ready: Ready, hops: &'static [Hop]) -> Outcome {
     let asked_to_stream = ready
         .request
         .get("stream")
@@ -38,24 +40,27 @@ pub(crate) async fn run(incoming: Incoming, ready: Ready, hops: &'static [Hop]) 
     );
     let provenance = Provenance {
         provider: ready.route.provider.clone(),
-        account: ready.account.clone(),
+        account: ready
+            .account
+            .clone()
+            .unwrap_or_else(|| "carried".to_owned()),
         model: model.clone(),
     };
 
     let needs_reasoning = crate::relay_path::needs_reasoning_declared(hops);
 
     if !asked_to_stream && incoming.wire == Wire::Responses {
-        return serve::reject(
+        return Outcome::Served(serve::reject(
             incoming.wire,
             StatusCode::BAD_REQUEST,
             "translating into the Responses format needs a stream to translate; set stream: true"
                 .into(),
-        );
+        ));
     }
 
     let target = declared.and_then(|model| model.target());
     if needs_reasoning && target.is_none() {
-        return serve::reject(
+        return Outcome::Served(serve::reject(
             incoming.wire,
             StatusCode::BAD_REQUEST,
             format!(
@@ -63,7 +68,7 @@ pub(crate) async fn run(incoming: Incoming, ready: Ready, hops: &'static [Hop]) 
                  and max_tokens, so the gateway knows how it reasons and how much it may write",
                 incoming.wire, ready.route.endpoint.wire
             ),
-        );
+        ));
     }
 
     let default_max_tokens = declared.and_then(|model| model.max_tokens).unwrap_or(4096);
@@ -76,12 +81,17 @@ pub(crate) async fn run(incoming: Incoming, ready: Ready, hops: &'static [Hop]) 
         }),
         default_max_tokens,
         envelopes: &incoming.app.inner.envelopes,
+        provenance: &provenance,
     };
 
     let translated = match crate::relay_path::carry(&incoming.body, hops, &ask) {
         Ok(translated) => translated,
         Err(error) => {
-            return serve::reject(incoming.wire, StatusCode::BAD_REQUEST, error.to_string());
+            return Outcome::Served(serve::reject(
+                incoming.wire,
+                StatusCode::BAD_REQUEST,
+                error.to_string(),
+            ));
         }
     };
 
@@ -94,11 +104,24 @@ pub(crate) async fn run(incoming: Incoming, ready: Ready, hops: &'static [Hop]) 
         );
     }
 
+    let mut translated = translated;
     let mut going = match serde_json::from_slice::<Value>(&translated.body) {
         Ok(Value::Object(going)) => going,
-        _ => return gateway_error("the translated request is not an object".to_owned()),
+        _ => {
+            return Outcome::Served(gateway_error(
+                "the translated request is not an object".to_owned(),
+            ));
+        }
     };
     going.insert("stream".into(), Value::Bool(true));
+    for refused in &ready.route.endpoint.refuses {
+        if going.remove(refused).is_some() {
+            translated.mapping.dropped(
+                format!("/{refused}"),
+                format!("{} refuses {refused}", ready.route.provider),
+            );
+        }
+    }
     if ready.route.endpoint.wire == Wire::Chat {
         going.insert(
             "stream_options".into(),
@@ -106,15 +129,27 @@ pub(crate) async fn run(incoming: Incoming, ready: Ready, hops: &'static [Hop]) 
         );
     }
 
-    let (mut headers, _) = serve::outgoing_headers(&incoming, &ready);
+    let (mut headers, _) = serve::outgoing_headers(incoming, &ready);
     headers.insert("content-type", HeaderValue::from_static("application/json"));
     headers.insert("accept", HeaderValue::from_static("text/event-stream"));
+
+    let mut row = serve::opened(incoming, &ready, None);
+    row.byte_identical = Some(false);
+    row.evidence = Some(serde_json::json!({
+        "moved": translated.mapping.moved,
+        "added": translated.mapping.added,
+        "dropped": translated.mapping.dropped,
+    }));
+    let _ = incoming.app.store().record_request(&row);
+    if ready.first_try() {
+        serve::announce_open(&incoming.app, &row);
+    }
 
     let sent = incoming
         .app
         .inner
         .client
-        .post(serve::endpoint_url(&ready))
+        .post(&ready.route.endpoint.url)
         .headers(headers)
         .body(serde_json::to_vec(&Value::Object(going)).unwrap_or_default())
         .send()
@@ -122,25 +157,12 @@ pub(crate) async fn run(incoming: Incoming, ready: Ready, hops: &'static [Hop]) 
 
     let upstream = match sent {
         Ok(response) => response,
-        Err(error) => return gateway_error(format!("upstream unreachable: {error}")),
+        Err(error) => {
+            return Outcome::Served(serve::unreachable(&incoming.app, row, ready.started, error));
+        }
     };
 
-    crate::observe(
-        &incoming.app,
-        &ready.account,
-        upstream.status().as_u16(),
-        upstream.headers(),
-    );
-    crate::quota::refresh_soon(&incoming.app, &ready.account, &ready.route.provider);
-
-    let mut row = serve::opened(&incoming, &ready, None);
-    row.byte_identical = Some(false);
     row.ttft_ms = Some(now() - ready.started);
-    row.evidence = Some(serde_json::json!({
-        "moved": translated.mapping.moved,
-        "added": translated.mapping.added,
-        "dropped": translated.mapping.dropped,
-    }));
     row.upstream_request_id = upstream
         .headers()
         .get("request-id")
@@ -150,16 +172,16 @@ pub(crate) async fn run(incoming: Incoming, ready: Ready, hops: &'static [Hop]) 
 
     let status = upstream.status().as_u16();
     if !(200..300).contains(&status) {
-        let (relayed, said) = crate::relay_failure(upstream).await;
-        row.status = "error".into();
-        row.error_kind = Some(format!("http_{status}"));
-        row.error_message = said;
-        row.duration_ms = Some(now() - ready.started);
-        let _ = incoming.app.store().record_request(&row);
-        return relayed;
+        return serve::answered_with_failure(incoming, &ready, row, upstream).await;
+    }
+    if let Some(account) = &ready.account {
+        crate::observe(&incoming.app, account, status, upstream.headers());
+        crate::quota::refresh_soon(&incoming.app, account, &ready.route.provider);
+    }
+    if !speaks_a_stream(upstream.headers()) {
+        return Outcome::Served(not_a_stream(incoming, &ready, row, upstream).await);
     }
     let _ = incoming.app.store().record_request(&row);
-    serve::announce_open(&incoming.app, &row);
 
     let settle = crate::Settle {
         app: incoming.app.clone(),
@@ -167,12 +189,55 @@ pub(crate) async fn run(incoming: Incoming, ready: Ready, hops: &'static [Hop]) 
         started: ready.started,
         price: ready.route.price(),
     };
-    let back = coming_back(&incoming, ready.route.endpoint.wire, &provenance, &model);
+    let back = coming_back(incoming, ready.route.endpoint.wire, &provenance, &model);
 
     if asked_to_stream {
-        return streamed(upstream, back, settle);
+        let ping = (incoming.wire == Wire::Messages).then_some(incoming.app.inner.ping_every);
+        return Outcome::Served(streamed(upstream, back, settle, ping));
     }
-    whole(upstream, back, incoming.wire, settle).await
+    Outcome::Served(whole(upstream, back, incoming.wire, settle).await)
+}
+
+fn speaks_a_stream(headers: &HeaderMap) -> bool {
+    headers
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|kind| {
+            kind.trim_start()
+                .to_ascii_lowercase()
+                .starts_with("text/event-stream")
+        })
+}
+
+async fn not_a_stream(
+    incoming: &Incoming,
+    ready: &Ready,
+    mut row: RequestRow,
+    upstream: reqwest::Response,
+) -> Response {
+    let kind = upstream
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("no content type")
+        .to_owned();
+    let body = upstream.bytes().await.unwrap_or_default();
+    let sent: String = String::from_utf8_lossy(&body)
+        .chars()
+        .take(KEPT_OF_AN_UNREADABLE_ANSWER)
+        .collect();
+    let message = format!(
+        "{} answered with {kind} instead of the event stream this gateway asked for, so there \
+         was nothing it could translate. Check that the endpoint honours \"stream\": true. It \
+         sent: {sent}",
+        ready.route.provider
+    );
+    row.status = "error".into();
+    row.error_kind = Some("not_a_stream".into());
+    row.error_message = Some(message.clone());
+    row.duration_ms = Some(now() - ready.started);
+    serve::settle_failure(&incoming.app, &row);
+    serve::reject(incoming.wire, StatusCode::BAD_GATEWAY, message)
 }
 
 fn coming_back(incoming: &Incoming, egress: Wire, provenance: &Provenance, model: &str) -> Back {
@@ -200,17 +265,37 @@ fn coming_back(incoming: &Incoming, egress: Wire, provenance: &Provenance, model
             created: now() / 1000,
         })
     };
+    let from_responses = || {
+        Box::new(responses_to_messages::StreamTranslator::new(
+            responses_to_messages::StreamTarget {
+                message_id: format!("msg_{}", crate::request_id()),
+                model: model.to_owned(),
+                provenance: provenance.clone(),
+                nonce_seed: nonce_seed(),
+            },
+            incoming.app.inner.envelopes.clone(),
+        ))
+    };
 
     match (egress, incoming.wire) {
         (Wire::Messages, Wire::Responses) => Back::MessagesToResponses(responses()),
         (Wire::Messages, Wire::Chat) => Back::MessagesToChat(chat()),
         (Wire::Chat, Wire::Messages) => Back::ChatToMessages(messages()),
         (Wire::Chat, Wire::Responses) => Back::ChatToResponses(messages(), responses()),
+        (Wire::Responses, Wire::Messages) => Back::ResponsesToMessages(from_responses()),
+        (Wire::Responses, Wire::Chat) => Back::ResponsesToChat(from_responses(), chat()),
         _ => Back::ChatToMessages(messages()),
     }
 }
 
-fn streamed(upstream: reqwest::Response, back: Back, settle: crate::Settle) -> Response {
+const PING: &[u8] = b"event: ping\ndata: {\"type\":\"ping\"}\n\n";
+
+fn streamed(
+    upstream: reqwest::Response,
+    back: Back,
+    settle: crate::Settle,
+    ping: Option<std::time::Duration>,
+) -> Response {
     let state = (
         upstream.bytes_stream(),
         back,
@@ -221,7 +306,7 @@ fn streamed(upstream: reqwest::Response, back: Back, settle: crate::Settle) -> R
 
     let stream = futures_util::stream::unfold(
         state,
-        |(mut upstream, mut back, mut meter, mut settle, done)| async move {
+        move |(mut upstream, mut back, mut meter, mut settle, done)| async move {
             if done {
                 return None;
             }
@@ -230,7 +315,19 @@ fn streamed(upstream: reqwest::Response, back: Back, settle: crate::Settle) -> R
                     settle.finish(meter);
                 }
             };
-            match upstream.next().await {
+            let next = match ping {
+                Some(every) => match tokio::time::timeout(every, upstream.next()).await {
+                    Ok(next) => next,
+                    Err(_) => {
+                        return Some((
+                            Ok(Bytes::from_static(PING)),
+                            (upstream, back, meter, settle, false),
+                        ));
+                    }
+                },
+                None => upstream.next().await,
+            };
+            match next {
                 Some(Ok(bytes)) => {
                     meter.observe(&bytes);
                     let carried = back.push(&bytes);

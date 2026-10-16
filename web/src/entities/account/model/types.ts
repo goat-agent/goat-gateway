@@ -9,4 +9,6 @@ export type Account = {
   state: AccountState;
   cooldown_until: number | null;
   created_at: number;
+  owner: string | null;
+  owner_name: string | null;
 };

@@ -6,11 +6,55 @@ use tokio::{
     sync::oneshot,
 };
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Callback {
     pub code: Option<String>,
     pub state: Option<String>,
     pub error: Option<String>,
+    pub client_id: Option<String>,
+}
+
+impl Callback {
+    pub fn from_query(query: &str) -> Self {
+        let pairs = parse_query(query);
+        let (code, folded_state) = match pairs.get("code") {
+            Some(code) => match code.split_once('#') {
+                Some((code, state)) => (Some(code.to_owned()), Some(state.to_owned())),
+                None => (Some(code.clone()), None),
+            },
+            None => (None, None),
+        };
+        Self {
+            code,
+            state: folded_state.or_else(|| pairs.get("state").cloned()),
+            error: pairs
+                .get("error_description")
+                .or_else(|| pairs.get("error"))
+                .cloned(),
+            client_id: pairs.get("client_id").cloned(),
+        }
+    }
+
+    pub fn pasted(text: &str) -> Self {
+        let text = text.trim();
+        if let Some((_, query)) = text.split_once('?') {
+            return Self::from_query(query);
+        }
+        if text.contains("code=") {
+            return Self::from_query(text);
+        }
+        match text.split_once('#') {
+            Some((code, state)) => Self {
+                code: Some(code.to_owned()),
+                state: Some(state.to_owned()),
+                ..Self::default()
+            },
+            None => Self {
+                code: (!text.is_empty()).then(|| text.to_owned()),
+                ..Self::default()
+            },
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -71,16 +115,7 @@ fn parse_request(bytes: &[u8]) -> Callback {
         return Callback::default();
     };
     let query = target.split_once('?').map(|(_, rest)| rest).unwrap_or("");
-    let pairs = parse_query(query);
-
-    Callback {
-        code: pairs.get("code").cloned(),
-        state: pairs.get("state").cloned(),
-        error: pairs
-            .get("error_description")
-            .or_else(|| pairs.get("error"))
-            .cloned(),
-    }
+    Callback::from_query(query)
 }
 
 fn parse_query(query: &str) -> HashMap<String, String> {
@@ -173,6 +208,35 @@ mod tests {
         let callback = parse_request(request);
         assert_eq!(callback.code, None);
         assert_eq!(callback.error.as_deref(), Some("User said no"));
+    }
+
+    #[test]
+    fn a_registration_callback_carries_the_client_it_issued() {
+        let request = b"GET /auth/callback?code=c&scope=openid+email&state=s&client_id=oaiapp_9 HTTP/1.1\r\n\r\n";
+        let callback = parse_request(request);
+        assert_eq!(callback.client_id.as_deref(), Some("oaiapp_9"));
+        assert_eq!(callback.code.as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn whatever_the_browser_showed_can_be_pasted_back() {
+        let address_bar = Callback::pasted(
+            "http://127.0.0.1:1455/auth/callback?code=ac_1&state=st_1&client_id=oaiapp_2",
+        );
+        assert_eq!(address_bar.code.as_deref(), Some("ac_1"));
+        assert_eq!(address_bar.state.as_deref(), Some("st_1"));
+        assert_eq!(address_bar.client_id.as_deref(), Some("oaiapp_2"));
+
+        let anthropic = Callback::pasted("  ac_123#st_456 ");
+        assert_eq!(anthropic.code.as_deref(), Some("ac_123"));
+        assert_eq!(anthropic.state.as_deref(), Some("st_456"));
+
+        let folded =
+            Callback::pasted("https://platform.claude.com/oauth/code/callback?code=ac_1#st_2&x=1");
+        assert_eq!(folded.code.as_deref(), Some("ac_1"));
+        assert_eq!(folded.state.as_deref(), Some("st_2"));
+
+        assert_eq!(Callback::pasted("   ").code, None);
     }
 
     #[test]

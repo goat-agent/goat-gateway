@@ -116,4 +116,51 @@ CREATE TABLE settings (
 CREATE INDEX requests_by_conversation ON requests(conversation, started_at DESC);
 "#,
     ),
+    (
+        "0004_chatgpt_is_its_own_provider",
+        r#"
+UPDATE accounts SET provider = 'chatgpt' WHERE provider = 'openai' AND credential_kind = 'oauth';
+"#,
+    ),
+    (
+        "0005_people_own_what_they_sign_in_to",
+        r#"
+ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'member';
+ALTER TABLE users ADD COLUMN password TEXT;
+
+CREATE TABLE sessions (
+    hash       BLOB PRIMARY KEY,
+    user_id    TEXT REFERENCES users(id) ON DELETE CASCADE,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
+);
+
+CREATE TABLE invites (
+    hash       BLOB PRIMARY KEY,
+    user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expires_at INTEGER NOT NULL
+);
+
+ALTER TABLE accounts ADD COLUMN owner TEXT REFERENCES users(id) ON DELETE CASCADE;
+
+ALTER TABLE requests ADD COLUMN user_id TEXT;
+ALTER TABLE requests ADD COLUMN key_id TEXT;
+ALTER TABLE requests ADD COLUMN credential TEXT;
+ALTER TABLE requests ADD COLUMN attempts TEXT;
+CREATE INDEX requests_by_user ON requests(user_id, started_at DESC);
+
+CREATE TABLE demotions (
+    key_id  TEXT NOT NULL REFERENCES keys(id) ON DELETE CASCADE,
+    account TEXT NOT NULL REFERENCES accounts(name) ON DELETE CASCADE ON UPDATE CASCADE,
+    until   INTEGER,
+    cause   TEXT NOT NULL,
+    set_at  INTEGER NOT NULL,
+    PRIMARY KEY (key_id, account)
+);
+
+UPDATE users SET role = 'admin' WHERE (SELECT COUNT(*) FROM users) = 1;
+UPDATE accounts SET owner = (SELECT id FROM users)
+ WHERE credential_kind = 'oauth' AND (SELECT COUNT(*) FROM users) = 1;
+"#,
+    ),
 ];

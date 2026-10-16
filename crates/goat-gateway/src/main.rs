@@ -61,7 +61,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("registered the account from ANTHROPIC_API_KEY");
     }
 
-    let app = App::new(store, envelope_key_from(&master_key), load_catalog(&dir)?);
+    let app = App::new(store, envelope_key_from(&master_key), load_catalog(&dir)?)
+        .reading(dir.join("config.toml"));
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
     tracing::info!(%addr, data = %dir.display(), "listening");

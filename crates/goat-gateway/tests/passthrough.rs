@@ -321,3 +321,68 @@ fn catalog_at(upstream: SocketAddr) -> goat_gateway::provider::Catalog {
     goat_gateway::provider::Catalog::builtin()
         .with_base_url("anthropic", &format!("http://{upstream}"))
 }
+
+#[tokio::test]
+async fn a_passthrough_to_a_provider_that_only_answers_when_asked_asks_once() {
+    let asked = Arc::new(Mutex::new(0u32));
+    let counted = asked.clone();
+    let upstream = serve(
+        Router::new()
+            .route(
+                "/api/anthropic/v1/messages",
+                post(|| async {
+                    Response::builder()
+                        .status(200)
+                        .header("content-type", "text/event-stream")
+                        .body(Body::from(SSE))
+                        .unwrap()
+                }),
+            )
+            .route(
+                "/api/monitor/usage/quota/limit",
+                axum::routing::get(move || {
+                    let counted = counted.clone();
+                    async move {
+                        *counted.lock().unwrap() += 1;
+                        axum::Json(serde_json::json!({ "data": { "limits": [] } }))
+                    }
+                }),
+            ),
+    )
+    .await;
+
+    let store = Store::in_memory(&[7u8; 32]).unwrap();
+    store
+        .add_account("plan", "zai", "api_key", b"zai-key")
+        .unwrap();
+    let user = store.add_user("jmo").unwrap();
+    let key = store.issue_key(&user.id, "test").unwrap().secret;
+    let catalog = goat_gateway::provider::Catalog::builtin()
+        .with_base_url("zai", &format!("http://{upstream}"));
+    let gateway = serve(App::new(store, [1u8; 32], catalog).router()).await;
+
+    for _ in 0..2 {
+        reqwest::Client::new()
+            .post(format!("http://{gateway}/v1/messages"))
+            .header("x-api-key", &key)
+            .json(&serde_json::json!({ "model": "glm-4.7", "max_tokens": 8, "messages": [] }))
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+    }
+
+    for _ in 0..50 {
+        if *asked.lock().unwrap() > 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        *asked.lock().unwrap(),
+        1,
+        "Claude Code talks to a coding plan by passthrough, so that is where quota has to be read"
+    );
+}
