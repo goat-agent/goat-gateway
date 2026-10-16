@@ -41,6 +41,7 @@ pub struct StreamTranslator {
     target: StreamTarget,
     started: bool,
     finished: bool,
+    done: bool,
     open: Option<Open>,
     next_index: usize,
     stop_reason: Option<&'static str>,
@@ -55,6 +56,7 @@ impl StreamTranslator {
             target,
             started: false,
             finished: false,
+            done: false,
             open: None,
             next_index: 0,
             stop_reason: None,
@@ -90,6 +92,10 @@ impl StreamTranslator {
 
     pub fn finish(&mut self) -> Vec<u8> {
         let mut out = String::new();
+        if !self.finished && self.stop_reason.is_none() && !self.done {
+            self.relay_error(&json!({ "type": "api_error", "message": "the provider's stream ended before it said the response was complete" }), &mut out);
+            return out.into_bytes();
+        }
         self.close_open(&mut out);
         if self.started && !self.finished {
             self.finished = true;
@@ -114,6 +120,7 @@ impl StreamTranslator {
 
     fn take(&mut self, frame: &Frame, out: &mut String) {
         if frame.data.trim() == "[DONE]" {
+            self.done = true;
             return;
         }
         let Some(chunk) = frame.json() else { return };
@@ -385,6 +392,25 @@ mod tests {
     }
 
     #[test]
+    fn a_stream_cut_off_before_it_finished_says_so() {
+        let frames = run(&[
+            chunk(json!({ "role": "assistant", "content": "" }), None),
+            chunk(json!({ "content": "Half an ans" }), None),
+        ]);
+
+        let seen = events(&frames);
+        assert_eq!(
+            seen.last().map(String::as_str),
+            Some("error"),
+            "ending quietly would make a broken answer look finished: {seen:?}"
+        );
+        assert!(
+            !seen.iter().any(|event| event == "message_stop"),
+            "{seen:?}"
+        );
+    }
+
+    #[test]
     fn plain_text_becomes_one_block_from_start_to_stop() {
         let frames = run(&[
             chunk(json!({ "role": "assistant", "content": "" }), None),
@@ -571,10 +597,15 @@ mod tests {
     }
 
     #[test]
-    fn nothing_at_all_produces_nothing_at_all() {
+    fn a_stream_that_says_nothing_at_all_is_not_an_answer() {
         let mut translator = StreamTranslator::new(target());
         assert!(translator.push(b"").is_empty());
-        assert!(translator.finish().is_empty());
+        let frames = Parser::default().push(&translator.finish());
+        assert_eq!(
+            events(&frames),
+            ["error"],
+            "an empty answer must not reach a client as a finished one"
+        );
     }
 }
 
