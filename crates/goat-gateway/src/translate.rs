@@ -1,6 +1,6 @@
 use axum::{
     body::{Body, Bytes},
-    http::{HeaderValue, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
 use futures_util::StreamExt as _;
@@ -14,8 +14,10 @@ use crate::{
     provider::Wire,
     relay_path::{Ask, Back, Hop},
     serve::{self, Incoming, Outcome, Ready},
-    store::now,
+    store::{RequestRow, now},
 };
+
+const KEPT_OF_AN_UNREADABLE_ANSWER: usize = 2000;
 
 pub(crate) async fn run(incoming: &Incoming, ready: Ready, hops: &'static [Hop]) -> Outcome {
     let asked_to_stream = ready
@@ -176,6 +178,9 @@ pub(crate) async fn run(incoming: &Incoming, ready: Ready, hops: &'static [Hop])
         crate::observe(&incoming.app, account, status, upstream.headers());
         crate::quota::refresh_soon(&incoming.app, account, &ready.route.provider);
     }
+    if !speaks_a_stream(upstream.headers()) {
+        return Outcome::Served(not_a_stream(incoming, &ready, row, upstream).await);
+    }
     let _ = incoming.app.store().record_request(&row);
 
     let settle = crate::Settle {
@@ -191,6 +196,48 @@ pub(crate) async fn run(incoming: &Incoming, ready: Ready, hops: &'static [Hop])
         return Outcome::Served(streamed(upstream, back, settle, ping));
     }
     Outcome::Served(whole(upstream, back, incoming.wire, settle).await)
+}
+
+fn speaks_a_stream(headers: &HeaderMap) -> bool {
+    headers
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|kind| {
+            kind.trim_start()
+                .to_ascii_lowercase()
+                .starts_with("text/event-stream")
+        })
+}
+
+async fn not_a_stream(
+    incoming: &Incoming,
+    ready: &Ready,
+    mut row: RequestRow,
+    upstream: reqwest::Response,
+) -> Response {
+    let kind = upstream
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("no content type")
+        .to_owned();
+    let body = upstream.bytes().await.unwrap_or_default();
+    let sent: String = String::from_utf8_lossy(&body)
+        .chars()
+        .take(KEPT_OF_AN_UNREADABLE_ANSWER)
+        .collect();
+    let message = format!(
+        "{} answered with {kind} instead of the event stream this gateway asked for, so there \
+         was nothing it could translate. Check that the endpoint honours \"stream\": true. It \
+         sent: {sent}",
+        ready.route.provider
+    );
+    row.status = "error".into();
+    row.error_kind = Some("not_a_stream".into());
+    row.error_message = Some(message.clone());
+    row.duration_ms = Some(now() - ready.started);
+    serve::settle_failure(&incoming.app, &row);
+    serve::reject(incoming.wire, StatusCode::BAD_GATEWAY, message)
 }
 
 fn coming_back(incoming: &Incoming, egress: Wire, provenance: &Provenance, model: &str) -> Back {

@@ -666,7 +666,7 @@ pub fn announce_open(app: &App, row: &RequestRow) {
 
 pub fn reject(wire: Wire, status: StatusCode, message: String) -> Response {
     let kind = match status {
-        StatusCode::SERVICE_UNAVAILABLE => "api_error",
+        StatusCode::SERVICE_UNAVAILABLE | StatusCode::BAD_GATEWAY => "api_error",
         StatusCode::UNAUTHORIZED => "authentication_error",
         _ => "invalid_request_error",
     };

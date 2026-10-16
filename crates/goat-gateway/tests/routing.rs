@@ -840,3 +840,75 @@ async fn a_quiet_translated_stream_keeps_claude_code_from_giving_up() {
     );
     assert!(text.contains("message_stop"));
 }
+
+async fn kimi_answering(
+    content_type: &'static str,
+    body: &'static str,
+) -> (SocketAddr, String, Store) {
+    let upstream = serve(Router::new().route(
+        "/coding/v1/chat/completions",
+        post(move || async move {
+            Response::builder()
+                .status(200)
+                .header("content-type", content_type)
+                .body(Body::from(body))
+                .unwrap()
+        }),
+    ))
+    .await;
+
+    let store = Store::in_memory(&[7u8; 32]).unwrap();
+    store
+        .add_account("coding plan", "kimi", "api_key", b"key-kimi")
+        .unwrap();
+    let user = store.add_user("jmo").unwrap();
+    let key = store.issue_key(&user.id, "test").unwrap().secret;
+    let catalog = Catalog::builtin().with_base_url("kimi", &format!("http://{upstream}"));
+    let gateway = serve(App::new(store.clone(), [1u8; 32], catalog).router()).await;
+    (gateway, key, store)
+}
+
+async fn claude_code_asks(gateway: SocketAddr, key: &str, stream: bool) -> (u16, String) {
+    let response = reqwest::Client::new()
+        .post(format!("http://{gateway}/v1/messages"))
+        .header("x-api-key", key)
+        .json(&claude_code_turn(stream))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    (status, response.text().await.unwrap())
+}
+
+#[tokio::test]
+async fn a_provider_that_ignores_the_stream_it_was_asked_for_fails_rather_than_answering_empty() {
+    let (gateway, key, store) = kimi_answering(
+        "application/json",
+        r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}"#,
+    )
+    .await;
+
+    for stream in [false, true] {
+        let (status, body) = claude_code_asks(gateway, &key, stream).await;
+        assert_ne!(
+            status, 200,
+            "an answer the gateway could not read must not reach the client as a complete one: {body}"
+        );
+        assert!(body.contains("application/json"), "{body}");
+
+        let row = store
+            .recent_requests(1)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        assert_eq!(row.status, "error", "stream {stream}");
+        assert!(
+            row.error_message
+                .as_deref()
+                .is_some_and(|said| said.contains("hello")),
+            "what the provider sent is the only explanation, so it is kept: {:?}",
+            row.error_message
+        );
+    }
+}
