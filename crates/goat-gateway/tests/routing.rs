@@ -912,3 +912,60 @@ async fn a_provider_that_ignores_the_stream_it_was_asked_for_fails_rather_than_a
         );
     }
 }
+
+#[tokio::test]
+async fn the_tokens_a_translated_answer_reports_are_the_tokens_recorded() {
+    let (gateway, key, store) = kimi_answering("text/event-stream", CHAT_SSE).await;
+
+    let (status, body) = claude_code_asks(gateway, &key, false).await;
+    assert_eq!(status, 200, "{body}");
+    let told: Value = serde_json::from_str(&body).unwrap();
+    let row = store
+        .recent_requests(1)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+
+    assert_eq!(row.status, "ok");
+    assert_eq!(
+        row.usage.input_tokens,
+        told["usage"]["input_tokens"].as_i64()
+    );
+    assert_eq!(
+        row.usage.output_tokens,
+        told["usage"]["output_tokens"].as_i64()
+    );
+    assert_eq!(
+        row.usage.cache_read_tokens,
+        told["usage"]["cache_read_input_tokens"].as_i64()
+    );
+    assert!(
+        row.usage.output_tokens.is_some(),
+        "usage the provider reported must not be lost on the way through a translation"
+    );
+}
+
+#[tokio::test]
+async fn a_translated_stream_that_was_cut_short_is_recorded_as_a_failure() {
+    let (gateway, key, store) = kimi_answering(
+        "text/event-stream",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Half\"}}]}\n\n",
+    )
+    .await;
+
+    let (_, body) = claude_code_asks(gateway, &key, true).await;
+    assert!(body.contains("event: error"), "{body}");
+    assert!(!body.contains("message_stop"), "{body}");
+
+    let row = store
+        .recent_requests(1)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    assert_eq!(
+        row.status, "error",
+        "a stream the client saw fail must not be counted as a success"
+    );
+}
