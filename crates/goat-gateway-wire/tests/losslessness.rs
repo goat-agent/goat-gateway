@@ -435,3 +435,290 @@ fn a_field_we_cannot_honour_is_named_even_when_we_recognise_it() {
     }
     assert!(out.mapping.lost_anything());
 }
+
+mod into_responses {
+    use goat_gateway_wire::{
+        Envelopes, Provenance,
+        messages_to_responses::{self, RequestTarget},
+        responses_to_messages::{StreamTarget, StreamTranslator},
+        sse::{Frame, Parser},
+    };
+    use serde_json::{Value, json};
+
+    fn envelopes() -> Envelopes {
+        Envelopes::new(&[9u8; 32])
+    }
+
+    fn provenance() -> Provenance {
+        Provenance {
+            provider: "chatgpt".into(),
+            account: "ChatGPT Pro".into(),
+            model: "gpt-5-codex".into(),
+        }
+    }
+
+    fn target() -> RequestTarget {
+        RequestTarget {
+            model: "gpt-5-codex".into(),
+            provenance: provenance(),
+        }
+    }
+
+    fn translate(request: &Value) -> (Value, Vec<String>) {
+        let translated = messages_to_responses::translate(
+            &serde_json::to_vec(request).unwrap(),
+            &target(),
+            &envelopes(),
+        )
+        .unwrap();
+        let dropped = translated
+            .mapping
+            .dropped
+            .iter()
+            .map(|drop| drop.pointer.clone())
+            .collect();
+        (serde_json::from_slice(&translated.body).unwrap(), dropped)
+    }
+
+    fn stream() -> String {
+        [
+            json!({ "type": "response.created", "response": { "id": "resp_1" } }),
+            json!({ "type": "response.output_item.added", "item": { "type": "reasoning", "id": "rs_1" } }),
+            json!({ "type": "response.reasoning_summary_part.added", "item_id": "rs_1" }),
+            json!({ "type": "response.reasoning_summary_text.delta", "item_id": "rs_1", "delta": "weighing" }),
+            json!({ "type": "response.output_item.done", "item": { "type": "reasoning", "id": "rs_1", "encrypted_content": "gAAA-opaque", "summary": [{ "type": "summary_text", "text": "weighing" }] } }),
+            json!({ "type": "response.output_item.added", "item": { "type": "message", "id": "msg_1" } }),
+            json!({ "type": "response.content_part.added", "item_id": "msg_1", "part": { "type": "output_text", "text": "" } }),
+            json!({ "type": "response.output_text.delta", "item_id": "msg_1", "delta": "Running " }),
+            json!({ "type": "response.output_text.delta", "item_id": "msg_1", "delta": "it." }),
+            json!({ "type": "response.content_part.done", "item_id": "msg_1" }),
+            json!({ "type": "response.output_item.added", "item": { "type": "function_call", "id": "fc_1", "call_id": "toolu_01ABC", "name": "bash" } }),
+            json!({ "type": "response.function_call_arguments.delta", "item_id": "fc_1", "delta": "{\"cmd\":" }),
+            json!({ "type": "response.function_call_arguments.delta", "item_id": "fc_1", "delta": "\"ls\"}" }),
+            json!({ "type": "response.output_item.done", "item": { "type": "function_call", "id": "fc_1", "call_id": "toolu_01ABC", "name": "bash", "arguments": "{\"cmd\":\"ls\"}" } }),
+            json!({ "type": "response.completed", "response": { "usage": { "input_tokens": 1000, "input_tokens_details": { "cached_tokens": 800 }, "output_tokens": 42 } } }),
+        ]
+        .iter()
+        .map(|event| Frame::encode(event["type"].as_str().unwrap(), event))
+        .collect()
+    }
+
+    fn translator() -> StreamTranslator {
+        StreamTranslator::new(
+            StreamTarget {
+                message_id: "msg_gw".into(),
+                model: "gpt-5-codex".into(),
+                provenance: provenance(),
+                nonce_seed: [1; 8],
+            },
+            envelopes(),
+        )
+    }
+
+    fn translated_in_pieces(text: &str, at: usize) -> Vec<u8> {
+        let mut translator = translator();
+        let mut out = Vec::new();
+        for piece in text.as_bytes().chunks(at) {
+            out.extend(translator.push(piece));
+        }
+        out.extend(translator.finish());
+        out
+    }
+
+    fn frames(bytes: &[u8]) -> Vec<Value> {
+        let mut parser = Parser::default();
+        parser.push(bytes).iter().filter_map(Frame::json).collect()
+    }
+
+    #[test]
+    fn a_tool_id_crosses_into_responses_unchanged_both_ways() {
+        let (body, _) = translate(&json!({
+            "model": "gpt-5-codex",
+            "max_tokens": 64,
+            "messages": [
+                { "role": "user", "content": "list files" },
+                { "role": "assistant", "content": [{ "type": "tool_use", "id": "toolu_01XYZ", "name": "bash", "input": { "cmd": "ls" } }] },
+                { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "toolu_01XYZ", "content": "a.txt" }] },
+            ],
+        }));
+        let input = body["input"].as_array().unwrap();
+        assert_eq!(input[1]["type"], "function_call");
+        assert_eq!(input[1]["call_id"], "toolu_01XYZ");
+        assert_eq!(input[1]["arguments"], "{\"cmd\":\"ls\"}");
+        assert_eq!(input[2]["type"], "function_call_output");
+        assert_eq!(input[2]["call_id"], "toolu_01XYZ");
+        assert_eq!(input[2]["output"], "a.txt");
+
+        let streamed = frames(&translated_in_pieces(&stream(), usize::MAX));
+        let started = streamed
+            .iter()
+            .find(|frame| frame["content_block"]["type"] == "tool_use")
+            .unwrap();
+        assert_eq!(started["content_block"]["id"], "toolu_01ABC");
+    }
+
+    #[test]
+    fn anthropic_thinking_never_reaches_openai_and_says_why() {
+        let (body, dropped) = translate(&json!({
+            "model": "gpt-5-codex",
+            "max_tokens": 64,
+            "messages": [
+                { "role": "user", "content": "hi" },
+                { "role": "assistant", "content": [
+                    { "type": "thinking", "thinking": "hmm", "signature": "EqQBCkYIBRgCKkA-anthropic" },
+                    { "type": "text", "text": "hello" },
+                ] },
+            ],
+        }));
+        assert!(
+            !body.to_string().contains("EqQBCkYIBRgCKkA-anthropic"),
+            "a signature OpenAI cannot verify must not be sent as if it could"
+        );
+        assert!(
+            !body["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["type"] == "reasoning")
+        );
+        assert!(
+            dropped
+                .iter()
+                .any(|pointer| pointer == "/messages/1/content/0"),
+            "{dropped:?}"
+        );
+    }
+
+    #[test]
+    fn openai_reasoning_comes_back_the_way_it_left() {
+        let streamed = frames(&translated_in_pieces(&stream(), usize::MAX));
+        let signature = streamed
+            .iter()
+            .find_map(|frame| frame["delta"]["signature"].as_str())
+            .expect("reasoning with encrypted content is carried as a sealed signature")
+            .to_owned();
+        assert!(
+            !signature.contains("gAAA-opaque"),
+            "the provider's blob travels sealed"
+        );
+
+        let (body, _) = translate(&json!({
+            "model": "gpt-5-codex",
+            "max_tokens": 64,
+            "messages": [
+                { "role": "user", "content": "hi" },
+                { "role": "assistant", "content": [
+                    { "type": "thinking", "thinking": "weighing", "signature": signature },
+                    { "type": "text", "text": "Running it." },
+                ] },
+                { "role": "user", "content": "go on" },
+            ],
+        }));
+        let reasoning = body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["type"] == "reasoning")
+            .expect("the reasoning item returns on the next turn");
+        assert_eq!(reasoning["encrypted_content"], "gAAA-opaque");
+        assert_eq!(reasoning["summary"][0]["text"], "weighing");
+    }
+
+    #[test]
+    fn what_cannot_be_carried_into_responses_is_written_down() {
+        let (body, dropped) = translate(&json!({
+            "model": "gpt-5-codex",
+            "max_tokens": 64,
+            "top_k": 5,
+            "stop_sequences": ["END"],
+            "metadata": { "user_id": "u1" },
+            "shipped_after_we_were_written": true,
+            "messages": [{ "role": "user", "content": "hi" }],
+        }));
+        for field in [
+            "top_k",
+            "stop_sequences",
+            "metadata",
+            "shipped_after_we_were_written",
+        ] {
+            assert!(
+                dropped
+                    .iter()
+                    .any(|pointer| pointer == &format!("/{field}")),
+                "{field} vanished without a note: {dropped:?}"
+            );
+            assert!(body.get(field).is_none());
+        }
+        assert_eq!(body["max_output_tokens"], 64);
+    }
+
+    #[test]
+    fn a_block_with_no_counterpart_in_responses_refuses_the_request() {
+        let refused = messages_to_responses::translate(
+            &serde_json::to_vec(&json!({
+                "model": "gpt-5-codex",
+                "max_tokens": 64,
+                "messages": [
+                    { "role": "assistant", "content": [{ "type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {} }] },
+                ],
+            }))
+            .unwrap(),
+            &target(),
+            &envelopes(),
+        );
+        assert!(refused.is_err());
+    }
+
+    #[test]
+    fn where_the_network_split_a_responses_stream_changes_nothing() {
+        let text = stream();
+        let whole = translated_in_pieces(&text, usize::MAX);
+        for at in [1, 2, 3, 7, 64, 511] {
+            assert_eq!(
+                translated_in_pieces(&text, at),
+                whole,
+                "splitting every {at} bytes changed what the client received"
+            );
+        }
+    }
+
+    #[test]
+    fn a_responses_stream_that_dies_says_so() {
+        let text = stream();
+        let cut = text.find("response.completed").unwrap() - 7;
+        let out = translated_in_pieces(&text[..cut], usize::MAX);
+        let last = frames(&out).pop().unwrap();
+        assert_eq!(
+            last["type"], "error",
+            "ending quietly would make a broken answer look finished"
+        );
+    }
+
+    #[test]
+    fn the_cached_share_of_the_prompt_is_reported_as_cache_reads() {
+        let streamed = frames(&translated_in_pieces(&stream(), usize::MAX));
+        let delta = streamed
+            .iter()
+            .find(|frame| frame["type"] == "message_delta")
+            .unwrap();
+        assert_eq!(delta["delta"]["stop_reason"], "tool_use");
+        assert_eq!(delta["usage"]["input_tokens"], 200);
+        assert_eq!(delta["usage"]["cache_read_input_tokens"], 800);
+        assert_eq!(delta["usage"]["output_tokens"], 42);
+    }
+
+    #[test]
+    fn what_the_responses_stream_said_and_what_it_assembled_agree() {
+        let mut translator = translator();
+        translator.push(stream().as_bytes());
+        let whole = translator.assembled();
+        let content = whole["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "thinking");
+        assert_eq!(content[0]["thinking"], "weighing");
+        assert!(content[0]["signature"].as_str().is_some());
+        assert_eq!(content[1]["text"], "Running it.");
+        assert_eq!(content[2]["id"], "toolu_01ABC");
+        assert_eq!(content[2]["input"]["cmd"], "ls");
+        assert_eq!(whole["stop_reason"], "tool_use");
+    }
+}

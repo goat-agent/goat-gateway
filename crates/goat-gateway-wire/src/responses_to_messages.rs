@@ -1,8 +1,9 @@
 use serde_json::{Map, Value, json};
 
 use crate::{
-    envelope::{Envelopes, Payload, Provenance},
+    envelope::{Envelopes, Payload, Portability, Provenance, Sealed},
     mapping::Mapping,
+    sse::{Frame, Parser},
 };
 
 pub use crate::mapping::{TranslateError, Translated};
@@ -310,6 +311,13 @@ fn convert_item(
                         Payload::RedactedThinking { data } => {
                             json!({ "type": "redacted_thinking", "data": data })
                         }
+                        Payload::Reasoning { .. } => {
+                            mapping.dropped(
+                                at("/encrypted_content"),
+                                "reasoning encrypted by OpenAI cannot be read by Anthropic",
+                            );
+                            return Ok(());
+                        }
                     };
                     messages.push("assistant", block);
                     mapping.moved();
@@ -548,6 +556,609 @@ fn apply_thinking(
     }
     mapping.moved();
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+pub struct StreamTarget {
+    pub message_id: String,
+    pub model: String,
+    pub provenance: Provenance,
+    pub nonce_seed: [u8; 8],
+}
+
+enum Opened {
+    Thinking {
+        item: Option<String>,
+        text: String,
+        parts: usize,
+        signature: Option<String>,
+    },
+    Text {
+        text: String,
+    },
+    Tool {
+        id: String,
+        name: String,
+        arguments: String,
+    },
+}
+
+struct Open {
+    index: usize,
+    opened: Opened,
+}
+
+pub struct StreamTranslator {
+    target: StreamTarget,
+    envelopes: Envelopes,
+    parser: Parser,
+    started: bool,
+    finished: bool,
+    open: Option<Open>,
+    next_index: usize,
+    blocks: Vec<Value>,
+    stop_reason: Option<&'static str>,
+    usage: Option<Value>,
+    saw_tool: bool,
+    nonce_counter: u32,
+}
+
+impl StreamTranslator {
+    pub fn new(target: StreamTarget, envelopes: Envelopes) -> Self {
+        Self {
+            target,
+            envelopes,
+            parser: Parser::default(),
+            started: false,
+            finished: false,
+            open: None,
+            next_index: 0,
+            blocks: Vec::new(),
+            stop_reason: None,
+            usage: None,
+            saw_tool: false,
+            nonce_counter: 0,
+        }
+    }
+
+    pub fn push(&mut self, chunk: &[u8]) -> Vec<u8> {
+        let mut out = String::new();
+        for frame in self.parser.push(chunk) {
+            self.take(&frame, &mut out);
+        }
+        out.into_bytes()
+    }
+
+    pub fn finish(&mut self) -> Vec<u8> {
+        let mut out = String::new();
+        if !self.finished {
+            self.close(&mut out);
+            self.fail(
+                &mut out,
+                "api_error",
+                "the provider's stream ended before it said the response was complete",
+            );
+        }
+        out.into_bytes()
+    }
+
+    pub fn assembled(&self) -> Value {
+        json!({
+            "id": self.target.message_id,
+            "type": "message",
+            "role": "assistant",
+            "model": self.target.model,
+            "content": self.blocks,
+            "stop_reason": self.stop_reason.unwrap_or("end_turn"),
+            "stop_sequence": Value::Null,
+            "usage": self.usage.clone().unwrap_or_else(|| json!({ "input_tokens": 0, "output_tokens": 0 })),
+        })
+    }
+
+    fn take(&mut self, frame: &Frame, out: &mut String) {
+        if self.finished {
+            return;
+        }
+        let Some(data) = frame.json() else { return };
+        let kind = data
+            .get("type")
+            .and_then(Value::as_str)
+            .or(frame.event.as_deref())
+            .unwrap_or_default()
+            .to_owned();
+
+        match kind.as_str() {
+            "response.created" | "response.in_progress" => self.start(out),
+            "response.output_item.added" => self.item_added(&data, out),
+            "response.content_part.added" => {
+                if data.pointer("/part/type").and_then(Value::as_str) == Some("output_text") {
+                    self.open_text(out);
+                }
+            }
+            "response.output_text.delta" | "response.refusal.delta" => {
+                let text = data.get("delta").and_then(Value::as_str).unwrap_or("");
+                self.text(text, out);
+            }
+            "response.content_part.done" => {
+                if matches!(
+                    self.open,
+                    Some(Open {
+                        opened: Opened::Text { .. },
+                        ..
+                    })
+                ) {
+                    self.close(out);
+                }
+            }
+            "response.reasoning_summary_part.added" => self.summary_part(&data, out),
+            "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+                let text = data.get("delta").and_then(Value::as_str).unwrap_or("");
+                let item = data.get("item_id").and_then(Value::as_str);
+                self.thought(item, text, out);
+            }
+            "response.function_call_arguments.delta" => {
+                let chunk = data.get("delta").and_then(Value::as_str).unwrap_or("");
+                self.arguments(chunk, out);
+            }
+            "response.output_item.done" => self.item_done(&data, out),
+            "response.completed" => {
+                self.settle(&data);
+                let reason = if self.saw_tool {
+                    "tool_use"
+                } else {
+                    "end_turn"
+                };
+                self.end(reason, out);
+            }
+            "response.incomplete" => {
+                self.settle(&data);
+                let reason = match data
+                    .pointer("/response/incomplete_details/reason")
+                    .and_then(Value::as_str)
+                {
+                    Some("max_output_tokens") => "max_tokens",
+                    Some("content_filter") => "refusal",
+                    _ if self.saw_tool => "tool_use",
+                    _ => "end_turn",
+                };
+                self.end(reason, out);
+            }
+            "response.failed" => {
+                let error = data
+                    .pointer("/response/error")
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                self.close(out);
+                self.fail(
+                    out,
+                    error
+                        .get("code")
+                        .and_then(Value::as_str)
+                        .unwrap_or("api_error"),
+                    error
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("the provider says the response failed"),
+                );
+            }
+            "error" => {
+                let code = data
+                    .get("code")
+                    .or_else(|| data.pointer("/error/type"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("api_error")
+                    .to_owned();
+                let message = data
+                    .get("message")
+                    .or_else(|| data.pointer("/error/message"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("the provider reported an error")
+                    .to_owned();
+                self.close(out);
+                self.fail(out, &code, &message);
+            }
+            _ => {}
+        }
+    }
+
+    fn start(&mut self, out: &mut String) {
+        if self.started {
+            return;
+        }
+        self.started = true;
+        out.push_str(&Frame::encode(
+            "message_start",
+            &json!({
+                "type": "message_start",
+                "message": {
+                    "id": self.target.message_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "model": self.target.model,
+                    "content": [],
+                    "stop_reason": Value::Null,
+                    "stop_sequence": Value::Null,
+                    "usage": { "input_tokens": 0, "output_tokens": 0 },
+                },
+            }),
+        ));
+    }
+
+    fn item_added(&mut self, data: &Value, out: &mut String) {
+        let item = data.get("item").unwrap_or(&Value::Null);
+        let item_id = item.get("id").and_then(Value::as_str).map(str::to_owned);
+        match item.get("type").and_then(Value::as_str) {
+            Some("reasoning") => self.open_thinking(item_id, out),
+            Some("function_call") => {
+                let id = item
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let name = item
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                self.open_tool(id, name, out);
+            }
+            _ => {}
+        }
+    }
+
+    fn summary_part(&mut self, data: &Value, out: &mut String) {
+        let item = data.get("item_id").and_then(Value::as_str);
+        self.thought(item, "", out);
+        if let Some(Open {
+            index,
+            opened: Opened::Thinking { parts, .. },
+        }) = &mut self.open
+        {
+            *parts += 1;
+            if *parts > 1 {
+                let index = *index;
+                self.delta(
+                    index,
+                    json!({ "type": "thinking_delta", "thinking": "\n\n" }),
+                    out,
+                );
+                if let Some(Open {
+                    opened: Opened::Thinking { text, .. },
+                    ..
+                }) = &mut self.open
+                {
+                    text.push_str("\n\n");
+                }
+            }
+        }
+    }
+
+    fn item_done(&mut self, data: &Value, out: &mut String) {
+        let item = data.get("item").unwrap_or(&Value::Null);
+        let item_id = item.get("id").and_then(Value::as_str).map(str::to_owned);
+        match item.get("type").and_then(Value::as_str) {
+            Some("reasoning") => {
+                let encrypted = item.get("encrypted_content").and_then(Value::as_str);
+                let thinking_open = matches!(
+                    self.open,
+                    Some(Open {
+                        opened: Opened::Thinking { .. },
+                        ..
+                    })
+                );
+                if !thinking_open && encrypted.is_none() {
+                    return;
+                }
+                if !thinking_open {
+                    self.open_thinking(item_id, out);
+                }
+                if let Some(encrypted) = encrypted {
+                    let summary = item
+                        .get("summary")
+                        .and_then(Value::as_array)
+                        .map(|parts| {
+                            parts
+                                .iter()
+                                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                                .map(str::to_owned)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let blob = self.seal(encrypted, summary);
+                    if let Some(Open {
+                        index,
+                        opened: Opened::Thinking { signature, .. },
+                    }) = &mut self.open
+                    {
+                        *signature = Some(blob.clone());
+                        let index = *index;
+                        self.delta(
+                            index,
+                            json!({ "type": "signature_delta", "signature": blob }),
+                            out,
+                        );
+                    }
+                }
+                self.close(out);
+            }
+            Some("function_call") => {
+                let tool_open = matches!(
+                    self.open,
+                    Some(Open {
+                        opened: Opened::Tool { .. },
+                        ..
+                    })
+                );
+                if !tool_open {
+                    let id = item
+                        .get("call_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned();
+                    let name = item
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned();
+                    self.open_tool(id, name, out);
+                }
+                let whole = item.get("arguments").and_then(Value::as_str).unwrap_or("");
+                let streamed_nothing = matches!(
+                    &self.open,
+                    Some(Open { opened: Opened::Tool { arguments, .. }, .. }) if arguments.is_empty()
+                );
+                if streamed_nothing && !whole.is_empty() {
+                    self.arguments(whole, out);
+                }
+                self.close(out);
+            }
+            Some("message") => {
+                if matches!(
+                    self.open,
+                    Some(Open {
+                        opened: Opened::Text { .. },
+                        ..
+                    })
+                ) {
+                    self.close(out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn open_thinking(&mut self, item: Option<String>, out: &mut String) {
+        self.start(out);
+        self.close(out);
+        let index = self.begin(json!({ "type": "thinking", "thinking": "" }), out);
+        self.open = Some(Open {
+            index,
+            opened: Opened::Thinking {
+                item,
+                text: String::new(),
+                parts: 0,
+                signature: None,
+            },
+        });
+    }
+
+    fn open_text(&mut self, out: &mut String) {
+        self.start(out);
+        if matches!(
+            self.open,
+            Some(Open {
+                opened: Opened::Text { .. },
+                ..
+            })
+        ) {
+            return;
+        }
+        self.close(out);
+        let index = self.begin(json!({ "type": "text", "text": "" }), out);
+        self.open = Some(Open {
+            index,
+            opened: Opened::Text {
+                text: String::new(),
+            },
+        });
+    }
+
+    fn open_tool(&mut self, id: String, name: String, out: &mut String) {
+        self.start(out);
+        self.close(out);
+        self.saw_tool = true;
+        let index = self.begin(
+            json!({ "type": "tool_use", "id": id, "name": name, "input": {} }),
+            out,
+        );
+        self.open = Some(Open {
+            index,
+            opened: Opened::Tool {
+                id,
+                name,
+                arguments: String::new(),
+            },
+        });
+    }
+
+    fn text(&mut self, chunk: &str, out: &mut String) {
+        if chunk.is_empty() {
+            return;
+        }
+        self.open_text(out);
+        if let Some(Open {
+            index,
+            opened: Opened::Text { text },
+        }) = &mut self.open
+        {
+            text.push_str(chunk);
+            let index = *index;
+            self.delta(index, json!({ "type": "text_delta", "text": chunk }), out);
+        }
+    }
+
+    fn thought(&mut self, item: Option<&str>, chunk: &str, out: &mut String) {
+        let same = matches!(
+            &self.open,
+            Some(Open { opened: Opened::Thinking { item: open, .. }, .. })
+                if item.is_none() || open.as_deref() == item
+        );
+        if !same {
+            self.open_thinking(item.map(str::to_owned), out);
+        }
+        if chunk.is_empty() {
+            return;
+        }
+        if let Some(Open {
+            index,
+            opened: Opened::Thinking { text, .. },
+        }) = &mut self.open
+        {
+            text.push_str(chunk);
+            let index = *index;
+            self.delta(
+                index,
+                json!({ "type": "thinking_delta", "thinking": chunk }),
+                out,
+            );
+        }
+    }
+
+    fn arguments(&mut self, chunk: &str, out: &mut String) {
+        if chunk.is_empty() {
+            return;
+        }
+        if let Some(Open {
+            index,
+            opened: Opened::Tool { arguments, .. },
+        }) = &mut self.open
+        {
+            arguments.push_str(chunk);
+            let index = *index;
+            self.delta(
+                index,
+                json!({ "type": "input_json_delta", "partial_json": chunk }),
+                out,
+            );
+        }
+    }
+
+    fn begin(&mut self, block: Value, out: &mut String) -> usize {
+        let index = self.next_index;
+        self.next_index += 1;
+        out.push_str(&Frame::encode(
+            "content_block_start",
+            &json!({ "type": "content_block_start", "index": index, "content_block": block }),
+        ));
+        index
+    }
+
+    fn delta(&self, index: usize, delta: Value, out: &mut String) {
+        out.push_str(&Frame::encode(
+            "content_block_delta",
+            &json!({ "type": "content_block_delta", "index": index, "delta": delta }),
+        ));
+    }
+
+    fn close(&mut self, out: &mut String) {
+        let Some(Open { index, opened }) = self.open.take() else {
+            return;
+        };
+        let block = match opened {
+            Opened::Thinking {
+                text, signature, ..
+            } => {
+                let mut block = json!({ "type": "thinking", "thinking": text });
+                if let Some(signature) = signature {
+                    block["signature"] = json!(signature);
+                }
+                block
+            }
+            Opened::Text { text } => json!({ "type": "text", "text": text }),
+            Opened::Tool {
+                id,
+                name,
+                arguments,
+            } => {
+                let input = if arguments.trim().is_empty() {
+                    json!({})
+                } else {
+                    serde_json::from_str(&arguments).unwrap_or(Value::String(arguments))
+                };
+                json!({ "type": "tool_use", "id": id, "name": name, "input": input })
+            }
+        };
+        self.blocks.push(block);
+        out.push_str(&Frame::encode(
+            "content_block_stop",
+            &json!({ "type": "content_block_stop", "index": index }),
+        ));
+    }
+
+    fn settle(&mut self, data: &Value) {
+        if let Some(usage) = data.pointer("/response/usage") {
+            let number = |pointer: &str| usage.pointer(pointer).and_then(Value::as_u64);
+            let input = number("/input_tokens").unwrap_or(0);
+            let cached = number("/input_tokens_details/cached_tokens").unwrap_or(0);
+            let mut converted = json!({
+                "input_tokens": input.saturating_sub(cached),
+                "cache_read_input_tokens": cached,
+                "output_tokens": number("/output_tokens").unwrap_or(0),
+            });
+            if number("/input_tokens").is_none() {
+                converted = json!({ "output_tokens": number("/output_tokens").unwrap_or(0) });
+            }
+            self.usage = Some(converted);
+        }
+    }
+
+    fn end(&mut self, reason: &'static str, out: &mut String) {
+        self.start(out);
+        self.close(out);
+        self.stop_reason = Some(reason);
+        self.finished = true;
+        let mut delta = json!({
+            "type": "message_delta",
+            "delta": { "stop_reason": reason, "stop_sequence": Value::Null },
+        });
+        if let Some(usage) = &self.usage {
+            delta["usage"] = usage.clone();
+        }
+        out.push_str(&Frame::encode("message_delta", &delta));
+        out.push_str(&Frame::encode(
+            "message_stop",
+            &json!({ "type": "message_stop" }),
+        ));
+    }
+
+    fn fail(&mut self, out: &mut String, kind: &str, message: &str) {
+        self.finished = true;
+        out.push_str(&Frame::encode(
+            "error",
+            &json!({
+                "type": "error",
+                "error": { "type": kind, "message": message },
+            }),
+        ));
+    }
+
+    fn seal(&mut self, encrypted: &str, summary: Vec<String>) -> String {
+        let mut nonce = [0u8; 12];
+        nonce[..8].copy_from_slice(&self.target.nonce_seed);
+        nonce[8..].copy_from_slice(&self.nonce_counter.to_le_bytes());
+        self.nonce_counter += 1;
+        self.envelopes.seal(
+            nonce,
+            &Sealed {
+                provenance: self.target.provenance.clone(),
+                portability: Portability::Account,
+                payload: Payload::Reasoning {
+                    encrypted_content: encrypted.to_owned(),
+                    summary,
+                },
+            },
+        )
+    }
 }
 
 #[cfg(test)]
