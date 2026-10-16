@@ -7,14 +7,16 @@ Register the AI accounts you already have. Point every client at one address.
 
   POST /v1/messages          ─┐      ┌─ Anthropic          (Messages)
   POST /v1/responses         ─┼─ ▸ ──┼─ OpenAI             (Responses, Chat)
-  POST /v1/chat/completions  ─┘      ├─ Z.ai GLM plan      (Messages)
+  POST /v1/chat/completions  ─┘      ├─ ChatGPT plan       (Responses)
+                                     ├─ Z.ai GLM plan      (Messages)
                                      ├─ Kimi coding plan   (Chat)
                                      └─ anything you declare
 ```
 
 A request in a format the provider already serves goes through **byte for byte**. Anything
 else is translated, and every field that could not come along is written down where you can
-see it. Accounts have names, not owners; a request goes to whichever one can serve it.
+see it. API keys can be shared; a plan you signed in to is yours alone, and a request goes to
+whichever account you may use that can serve it.
 
 ## Running it
 
@@ -29,6 +31,14 @@ at it:
 ```sh
 ANTHROPIC_BASE_URL=http://127.0.0.1:8787 ANTHROPIC_AUTH_TOKEN=gwk_… claude
 OPENAI_BASE_URL=http://127.0.0.1:8787/v1 OPENAI_API_KEY=gwk_… codex
+```
+
+A client already signed in to its own plan can keep using it through the gateway: send the
+gateway key as `x-gateway-key` and the client's own login travels to its provider untouched and
+unstored.
+
+```sh
+ANTHROPIC_BASE_URL=http://127.0.0.1:8787 ANTHROPIC_CUSTOM_HEADERS="x-gateway-key: gwk_…" claude
 ```
 
 | Variable | |
@@ -80,7 +90,23 @@ max_tokens = 32000                 # format; a passthrough model needs a name an
 ```
 
 `endpoints` is the whole routing story: what a provider serves is what it is passed, and
-everything else is a translation. Prices are micro-dollars per million tokens — leave one out
+everything else is a translation. The rest of a declaration says what the gateway cannot guess:
+
+```toml
+check = "https://api.example.com/v1/models"   # the connection test asks this and spends nothing
+carried = [{ header = "authorization", starts_with = "Bearer sk-ex-", hosts = ["api.example.com"] }]
+refusals = [{ status = 400, says = "not for this client", demote_minutes = 1440 }]
+
+[[provider.example.endpoints]]
+wire = "responses"
+url = "https://api.example.com/v1/responses"
+refuses = ["temperature"]                     # dropped, and written down, when translating
+
+[provider.example.sign_in]                   # a plan people sign in to; see builtin.toml
+```
+
+The console's Providers page finds out what an address speaks, shows the declaration it would
+write, and saves it to `config.toml` without a restart. Prices are micro-dollars per million tokens — leave one out
 and requests to that model show no cost rather than a cost of zero.
 
 Quota comes from response headers, from an endpoint, or not at all. For an endpoint, declare
@@ -117,7 +143,7 @@ can know them: how many requests are in flight, and how much quota is left.
 ## Building
 
 ```sh
-cargo test --workspace          # 283 tests
+cargo test --workspace          # 367 tests
 cargo clippy --workspace --all-targets
 npm --prefix web run check      # types, and the layering the console claims to have
 ```

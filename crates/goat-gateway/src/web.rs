@@ -10,6 +10,7 @@ use crate::App;
 
 #[derive(Embed)]
 #[folder = "../../web/dist"]
+#[allow_missing = true]
 struct Assets;
 
 pub fn router() -> Router<App> {
@@ -17,6 +18,14 @@ pub fn router() -> Router<App> {
 }
 
 async fn index() -> Response {
+    if Assets::get("index.html").is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            "This build has no console: it was compiled with GOAT_SKIP_WEB_BUILD set. \
+             Build again without it, or run `npm --prefix web run build` first.",
+        )
+            .into_response();
+    }
     serve("index.html")
 }
 

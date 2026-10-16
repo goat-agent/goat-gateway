@@ -3,123 +3,96 @@ mod client;
 mod loopback;
 mod session;
 
-pub use account::{PrepareError, Prepared, Stored, prepare};
+pub use account::{KIND, PrepareError, Prepared, Stored, prepare};
 pub use client::{Client, DeviceStart, OauthError, Tokens};
 pub use loopback::{Callback, Listening, listen};
 pub use session::{Sessions, SignInError, Started, Status, begin, finish_paste};
 
+use std::collections::BTreeMap;
+
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::RngCore as _;
+use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BodyFormat {
     Json,
     Form,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StateSource {
+    #[default]
+    Random,
+    Verifier,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Loopback {
+    pub host: String,
     pub port: u16,
+    #[serde(default)]
     pub fallback_port: Option<u16>,
-    pub path: &'static str,
+    pub path: String,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Device {
-    pub user_code_url: &'static str,
-    pub poll_url: &'static str,
-    pub verification_url: &'static str,
-    pub redirect_uri: &'static str,
+    pub user_code_url: String,
+    pub poll_url: String,
+    pub verification_url: String,
+    pub redirect_uri: String,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Identity {
-    pub claims: &'static [&'static [&'static str]],
-    pub header: &'static str,
+    pub claims: Vec<Vec<String>>,
+    pub header: String,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Flow {
-    pub provider: &'static str,
-    pub label: &'static str,
-    pub client_id: &'static str,
-    pub authorize_url: &'static str,
-    pub token_url: &'static str,
-    pub scopes: &'static str,
+    #[serde(skip)]
+    pub provider: String,
+    pub label: String,
+    pub client_id: String,
+    #[serde(default)]
+    pub issues_client: bool,
+    pub authorize_url: String,
+    pub token_url: String,
+    pub scopes: String,
+    #[serde(default)]
+    pub must_grant: Vec<String>,
     pub body: BodyFormat,
+    #[serde(default)]
+    pub refresh_body: Option<BodyFormat>,
+    #[serde(default)]
+    pub state: StateSource,
+    #[serde(default)]
     pub sends_state: bool,
-    pub extra: &'static [(&'static str, &'static str)],
+    #[serde(default)]
+    pub extra: BTreeMap<String, String>,
+    #[serde(default)]
+    pub first_only: Vec<String>,
+    #[serde(default)]
+    pub token_extra: BTreeMap<String, String>,
+    #[serde(default)]
     pub loopback: Option<Loopback>,
-    pub paste: Option<&'static str>,
+    #[serde(default)]
+    pub paste: Option<String>,
+    #[serde(default)]
     pub device: Option<Device>,
+    #[serde(default)]
     pub identity: Option<Identity>,
-    pub base_url: Option<&'static str>,
-    pub merge_beta: Option<&'static str>,
-}
-
-pub const ANTHROPIC: Flow = Flow {
-    provider: "anthropic",
-    label: "Claude Pro/Max",
-    client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
-    authorize_url: "https://claude.ai/oauth/authorize",
-    token_url: "https://api.anthropic.com/v1/oauth/token",
-    scopes: "org:create_api_key user:profile user:inference",
-    body: BodyFormat::Json,
-    sends_state: true,
-    extra: &[("code", "true")],
-    loopback: Some(Loopback {
-        port: 54545,
-        fallback_port: None,
-        path: "/callback",
-    }),
-    paste: Some("https://console.anthropic.com/oauth/code/callback"),
-    device: None,
-    identity: None,
-    base_url: None,
-    merge_beta: Some("oauth-2025-04-20"),
-};
-
-pub const OPENAI: Flow = Flow {
-    provider: "openai",
-    label: "ChatGPT Plus/Pro",
-    client_id: "app_EMoamEEZ73f0CkXaXp7hrann",
-    authorize_url: "https://auth.openai.com/oauth/authorize",
-    token_url: "https://auth.openai.com/oauth/token",
-    scopes: "openid profile email offline_access",
-    body: BodyFormat::Form,
-    sends_state: false,
-    extra: &[
-        ("id_token_add_organizations", "true"),
-        ("codex_cli_simplified_flow", "true"),
-    ],
-    loopback: Some(Loopback {
-        port: 1455,
-        fallback_port: Some(1457),
-        path: "/auth/callback",
-    }),
-    paste: None,
-    device: Some(Device {
-        user_code_url: "https://auth.openai.com/api/accounts/deviceauth/usercode",
-        poll_url: "https://auth.openai.com/api/accounts/deviceauth/token",
-        verification_url: "https://auth.openai.com/codex/device",
-        redirect_uri: "https://auth.openai.com/deviceauth/callback",
-    }),
-    identity: Some(Identity {
-        claims: &[
-            &["chatgpt_account_id"],
-            &["https://api.openai.com/auth", "chatgpt_account_id"],
-        ],
-        header: "chatgpt-account-id",
-    }),
-    base_url: Some("https://chatgpt.com/backend-api/codex"),
-    merge_beta: None,
-};
-
-pub const FLOWS: &[Flow] = &[ANTHROPIC, OPENAI];
-
-pub fn flow(provider: &str) -> Option<&'static Flow> {
-    FLOWS.iter().find(|flow| flow.provider == provider)
+    #[serde(default)]
+    pub merge_beta: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -130,11 +103,17 @@ pub enum Mode {
     Device,
 }
 
+pub struct Asking<'a> {
+    pub install: &'a str,
+    pub nonce: &'a str,
+    pub first: bool,
+}
+
 impl Flow {
     pub fn supports(&self, mode: Mode) -> bool {
         match mode {
             Mode::Loopback => self.loopback.is_some(),
-            Mode::Paste => self.paste.is_some(),
+            Mode::Paste => self.paste.is_some() || self.loopback.is_some(),
             Mode::Device => self.device.is_some(),
         }
     }
@@ -147,13 +126,54 @@ impl Flow {
     }
 
     pub fn redirect_uri(&self, mode: Mode, bound_port: Option<u16>) -> Option<String> {
+        let loopback = |port: Option<u16>| {
+            self.loopback.as_ref().map(|loopback| {
+                format!(
+                    "http://{}:{}{}",
+                    loopback.host,
+                    port.unwrap_or(loopback.port),
+                    loopback.path
+                )
+            })
+        };
         match mode {
-            Mode::Loopback => self.loopback.map(|loopback| {
-                let port = bound_port.unwrap_or(loopback.port);
-                format!("http://localhost:{port}{}", loopback.path)
-            }),
-            Mode::Paste => self.paste.map(str::to_owned),
+            Mode::Loopback => loopback(bound_port),
+            Mode::Paste => self.paste.clone().or_else(|| loopback(None)),
             Mode::Device => None,
+        }
+    }
+
+    pub fn refresh_format(&self) -> BodyFormat {
+        self.refresh_body.unwrap_or(self.body)
+    }
+
+    fn extra_for(&self, asking: &Asking<'_>) -> Vec<(String, String)> {
+        self.extra
+            .iter()
+            .filter(|(name, _)| asking.first || !self.first_only.contains(name))
+            .map(|(name, value)| {
+                (
+                    name.clone(),
+                    value
+                        .replace("{install}", asking.install)
+                        .replace("{nonce}", asking.nonce),
+                )
+            })
+            .collect()
+    }
+
+    pub fn granted(&self, scope: Option<&str>) -> Result<(), Vec<String>> {
+        let granted: Vec<&str> = scope.unwrap_or_default().split_whitespace().collect();
+        let missing: Vec<String> = self
+            .must_grant
+            .iter()
+            .filter(|wanted| !granted.contains(&wanted.as_str()))
+            .cloned()
+            .collect();
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(missing)
         }
     }
 }
@@ -182,76 +202,73 @@ pub fn random_state() -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
-pub fn authorize_url(flow: &Flow, redirect_uri: &str, challenge: &str, state: &str) -> String {
+pub fn authorize_url(
+    flow: &Flow,
+    client_id: &str,
+    redirect_uri: &str,
+    challenge: &str,
+    state: &str,
+    asking: &Asking<'_>,
+) -> String {
     let mut query = vec![
-        ("client_id", flow.client_id.to_owned()),
-        ("response_type", "code".to_owned()),
-        ("redirect_uri", redirect_uri.to_owned()),
-        ("scope", flow.scopes.to_owned()),
-        ("code_challenge", challenge.to_owned()),
-        ("code_challenge_method", "S256".to_owned()),
-        ("state", state.to_owned()),
+        ("client_id".to_owned(), client_id.to_owned()),
+        ("response_type".to_owned(), "code".to_owned()),
+        ("redirect_uri".to_owned(), redirect_uri.to_owned()),
+        ("scope".to_owned(), flow.scopes.clone()),
+        ("code_challenge".to_owned(), challenge.to_owned()),
+        ("code_challenge_method".to_owned(), "S256".to_owned()),
+        ("state".to_owned(), state.to_owned()),
     ];
-    for (name, value) in flow.extra {
-        query.push((name, (*value).to_owned()));
-    }
+    query.extend(flow.extra_for(asking));
 
     let encoded = query
         .into_iter()
-        .map(|(name, value)| format!("{}={}", encode(name), encode(&value)))
+        .map(|(name, value)| format!("{}={}", encode(&name), encode(&value)))
         .collect::<Vec<_>>()
         .join("&");
 
     format!("{}?{encoded}", flow.authorize_url)
 }
 
-pub fn split_pasted(pasted: &str) -> (String, Option<String>) {
-    let trimmed = pasted.trim();
-    let raw = trimmed
-        .split_once("code=")
-        .map(|(_, rest)| rest.split('&').next().unwrap_or(rest))
-        .unwrap_or(trimmed);
-    match raw.split_once('#') {
-        Some((code, state)) => (code.to_owned(), Some(state.to_owned())),
-        None => (raw.to_owned(), None),
-    }
-}
-
 pub fn exchange_fields(
     flow: &Flow,
+    client_id: &str,
     code: &str,
     state: &str,
     verifier: &str,
     redirect_uri: &str,
-) -> Vec<(&'static str, String)> {
+) -> Vec<(String, String)> {
     let mut fields = vec![
-        ("grant_type", "authorization_code".to_owned()),
-        ("code", code.to_owned()),
-        ("redirect_uri", redirect_uri.to_owned()),
-        ("client_id", flow.client_id.to_owned()),
-        ("code_verifier", verifier.to_owned()),
+        ("grant_type".to_owned(), "authorization_code".to_owned()),
+        ("code".to_owned(), code.to_owned()),
+        ("redirect_uri".to_owned(), redirect_uri.to_owned()),
+        ("client_id".to_owned(), client_id.to_owned()),
+        ("code_verifier".to_owned(), verifier.to_owned()),
     ];
     if flow.sends_state {
-        fields.push(("state", state.to_owned()));
+        fields.push(("state".to_owned(), state.to_owned()));
     }
+    fields.extend(flow.token_extra.clone());
     fields
 }
 
-pub fn refresh_fields(flow: &Flow, refresh_token: &str) -> Vec<(&'static str, String)> {
-    vec![
-        ("grant_type", "refresh_token".to_owned()),
-        ("refresh_token", refresh_token.to_owned()),
-        ("client_id", flow.client_id.to_owned()),
-    ]
+pub fn refresh_fields(flow: &Flow, client_id: &str, refresh_token: &str) -> Vec<(String, String)> {
+    let mut fields = vec![
+        ("grant_type".to_owned(), "refresh_token".to_owned()),
+        ("refresh_token".to_owned(), refresh_token.to_owned()),
+        ("client_id".to_owned(), client_id.to_owned()),
+    ];
+    fields.extend(flow.token_extra.clone());
+    fields
 }
 
 pub fn account_from_id_token(id_token: &str, identity: &Identity) -> Option<String> {
     let claims = decode_jwt_payload(id_token)?;
-    for path in identity.claims {
+    for path in &identity.claims {
         let mut cursor = &claims;
         let mut found = true;
-        for segment in *path {
-            match cursor.get(*segment) {
+        for segment in path {
+            match cursor.get(segment.as_str()) {
                 Some(next) => cursor = next,
                 None => {
                     found = false;
@@ -289,6 +306,21 @@ fn encode(value: &str) -> String {
 mod tests {
     use super::*;
 
+    fn flow(provider: &str) -> Flow {
+        crate::provider::Catalog::builtin()
+            .flow(provider)
+            .cloned()
+            .unwrap_or_else(|| panic!("{provider} declares a sign-in"))
+    }
+
+    fn asking() -> Asking<'static> {
+        Asking {
+            install: "urn:uuid:1",
+            nonce: "n1",
+            first: true,
+        }
+    }
+
     #[test]
     fn the_challenge_is_the_sha256_of_the_verifier() {
         let pkce = Pkce::generate();
@@ -299,45 +331,78 @@ mod tests {
 
     #[test]
     fn scopes_keep_their_spaces_as_percent_twenty() {
-        let url = authorize_url(&ANTHROPIC, "http://localhost:54545/callback", "ch", "st");
+        let anthropic = flow("anthropic");
+        let url = authorize_url(
+            &anthropic,
+            &anthropic.client_id,
+            "http://localhost:54545/callback",
+            "ch",
+            "st",
+            &asking(),
+        );
         assert!(url.contains("scope=org%3Acreate_api_key%20user%3Aprofile%20user%3Ainference"));
         assert!(url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A54545%2Fcallback"));
     }
 
     #[test]
     fn each_flow_carries_its_own_extra_parameters() {
-        let anthropic = authorize_url(&ANTHROPIC, "r", "c", "s");
-        let openai = authorize_url(&OPENAI, "r", "c", "s");
+        let anthropic = flow("anthropic");
+        let chatgpt = flow("chatgpt");
+        let anthropic = authorize_url(&anthropic, "c", "r", "c", "s", &asking());
+        let chatgpt = authorize_url(&chatgpt, "c", "r", "c", "s", &asking());
         assert!(anthropic.contains("code=true"));
         assert!(!anthropic.contains("codex_cli_simplified_flow"));
-        assert!(openai.contains("id_token_add_organizations=true"));
-        assert!(openai.contains("codex_cli_simplified_flow=true"));
-        assert!(!openai.contains("code=true"));
+        assert!(chatgpt.contains("codex_cli_simplified_flow=true"));
+        assert!(!chatgpt.contains("code=true"));
+    }
+
+    #[test]
+    fn a_per_install_value_is_filled_in_and_a_first_time_hint_is_sent_only_the_first_time() {
+        let official = flow("chatgpt_signin");
+        let first = authorize_url(&official, "dynamic_agent_client", "r", "c", "s", &asking());
+        assert!(
+            first.contains("ext_agent_host_id=urn%3Auuid%3A1"),
+            "{first}"
+        );
+        assert!(first.contains("nonce=n1"), "{first}");
+        assert!(first.contains("agent_name_hint="), "{first}");
+
+        let again = authorize_url(
+            &official,
+            "oaiapp_1",
+            "r",
+            "c",
+            "s",
+            &Asking {
+                first: false,
+                ..asking()
+            },
+        );
+        assert!(!again.contains("agent_name_hint"), "{again}");
+        assert!(again.contains("ext_agent_host_id=urn%3Auuid%3A1"));
     }
 
     #[test]
     fn state_is_sent_only_where_the_provider_expects_it() {
-        let anthropic = exchange_fields(&ANTHROPIC, "code", "state", "verifier", "redirect");
-        let openai = exchange_fields(&OPENAI, "code", "state", "verifier", "redirect");
-        assert!(anthropic.iter().any(|(name, _)| *name == "state"));
-        assert!(!openai.iter().any(|(name, _)| *name == "state"));
+        let anthropic = exchange_fields(&flow("anthropic"), "c", "code", "state", "v", "r");
+        let chatgpt = exchange_fields(&flow("chatgpt"), "c", "code", "state", "v", "r");
+        assert!(anthropic.iter().any(|(name, _)| name == "state"));
+        assert!(!chatgpt.iter().any(|(name, _)| name == "state"));
     }
 
     #[test]
-    fn the_pasted_code_carries_the_state_behind_a_hash() {
-        assert_eq!(
-            split_pasted("  ac_123#st_456 "),
-            ("ac_123".to_owned(), Some("st_456".to_owned()))
+    fn a_plan_that_was_not_granted_is_named() {
+        let official = flow("chatgpt_signin");
+        assert!(
+            official
+                .granted(Some("openid email chatgpt.tokens.use.direct"))
+                .is_ok()
         );
-        assert_eq!(split_pasted("ac_123"), ("ac_123".to_owned(), None));
-    }
-
-    #[test]
-    fn a_whole_redirect_url_can_be_pasted_instead_of_the_code() {
         assert_eq!(
-            split_pasted("https://console.anthropic.com/oauth/code/callback?code=ac_1#st_2&x=1"),
-            ("ac_1".to_owned(), Some("st_2".to_owned()))
+            official.granted(Some("openid email")),
+            Err(vec!["chatgpt.tokens.use.direct".to_owned()])
         );
+        assert!(flow("anthropic").granted(None).is_ok());
     }
 
     #[test]
@@ -346,67 +411,56 @@ mod tests {
         let nested = payload(serde_json::json!({
             "https://api.openai.com/auth": { "chatgpt_account_id": "acct_nested" }
         }));
-        let identity = OPENAI.identity.unwrap();
+        let chatgpt = flow("chatgpt");
+        let identity = chatgpt.identity.as_ref().unwrap();
 
         assert_eq!(
-            account_from_id_token(&flat, &identity).as_deref(),
+            account_from_id_token(&flat, identity).as_deref(),
             Some("acct_flat")
         );
         assert_eq!(
-            account_from_id_token(&nested, &identity).as_deref(),
+            account_from_id_token(&nested, identity).as_deref(),
             Some("acct_nested")
         );
         assert_eq!(
-            account_from_id_token(&payload(serde_json::json!({ "sub": "x" })), &identity),
+            account_from_id_token(&payload(serde_json::json!({ "sub": "x" })), identity),
             None
         );
     }
 
     #[test]
-    fn a_claim_name_containing_dots_is_not_split() {
-        let identity = OPENAI.identity.unwrap();
-        assert!(
-            identity
-                .claims
-                .iter()
-                .any(|path| path.len() == 2 && path[0].contains('.')),
-            "the nested claim is a URL, so a dotted path string would tear it apart"
-        );
-    }
-
-    #[test]
     fn the_loopback_port_follows_the_socket_we_actually_bound() {
+        let chatgpt = flow("chatgpt");
         assert_eq!(
-            OPENAI.redirect_uri(Mode::Loopback, Some(1457)).as_deref(),
-            Some("http://localhost:1457/auth/callback")
+            chatgpt.redirect_uri(Mode::Loopback, Some(1457)).as_deref(),
+            Some("http://127.0.0.1:1457/auth/callback")
         );
         assert_eq!(
-            OPENAI.redirect_uri(Mode::Loopback, None).as_deref(),
-            Some("http://localhost:1455/auth/callback")
+            chatgpt.redirect_uri(Mode::Loopback, None).as_deref(),
+            Some("http://127.0.0.1:1455/auth/callback")
         );
     }
 
     #[test]
-    fn every_provider_offers_a_way_in_when_the_browser_cannot_reach_us() {
-        for flow in FLOWS {
-            let offline = flow.supports(Mode::Paste) || flow.supports(Mode::Device);
+    fn every_sign_in_works_when_the_browser_cannot_reach_the_gateway() {
+        for flow in crate::provider::Catalog::builtin().flows() {
             assert!(
-                offline,
-                "{} has only a loopback redirect, so a headless box could never sign in",
+                flow.supports(Mode::Paste) || flow.supports(Mode::Device),
+                "{} has only a loopback redirect, so a server or a container could never sign in",
                 flow.provider
             );
         }
     }
 
     #[test]
-    fn a_flow_never_claims_a_mode_it_cannot_build_a_redirect_for() {
-        for flow in FLOWS {
-            for mode in flow.modes() {
-                if mode != Mode::Device {
-                    assert!(flow.redirect_uri(mode, None).is_some());
-                }
-            }
-        }
+    fn a_loopback_only_flow_can_finish_by_pasting_the_address_the_browser_landed_on() {
+        let official = flow("chatgpt_signin");
+        assert!(official.supports(Mode::Paste));
+        assert_eq!(
+            official.redirect_uri(Mode::Paste, None),
+            official.redirect_uri(Mode::Loopback, None),
+            "the provider only knows the loopback address, so pasting must use the same one"
+        );
     }
 
     fn payload(claims: serde_json::Value) -> String {

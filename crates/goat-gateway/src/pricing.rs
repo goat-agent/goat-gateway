@@ -1,6 +1,6 @@
 use crate::{provider::Price, store::Usage};
 
-pub const AS_OF: &str = "2026-08";
+pub const AS_OF: &str = "2026-10";
 
 pub fn cost_micros(price: Price, usage: &Usage) -> i64 {
     let per_mtok = |tokens: Option<i64>, rate: i64| tokens.unwrap_or(0) * rate / 1_000_000;
@@ -13,14 +13,14 @@ pub fn cost_micros(price: Price, usage: &Usage) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::Catalog;
 
-    fn sonnet() -> Price {
-        Catalog::builtin()
-            .model("anthropic", "claude-sonnet-5")
-            .unwrap()
-            .price
-            .unwrap()
+    fn priced() -> Price {
+        Price {
+            input: 3_000_000,
+            output: 15_000_000,
+            cache_read: 300_000,
+            cache_write: 3_750_000,
+        }
     }
 
     #[test]
@@ -33,7 +33,7 @@ mod tests {
             reasoning_tokens: None,
         };
         assert_eq!(
-            cost_micros(sonnet(), &usage),
+            cost_micros(priced(), &usage),
             3_000_000 + 15_000_000 + 300_000
         );
     }
@@ -47,6 +47,6 @@ mod tests {
             cache_write_tokens: None,
             reasoning_tokens: None,
         };
-        assert_eq!(cost_micros(sonnet(), &usage), 3_000_000);
+        assert_eq!(cost_micros(priced(), &usage), 3_000_000);
     }
 }

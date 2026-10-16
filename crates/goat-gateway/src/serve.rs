@@ -4,14 +4,16 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use goat_gateway_wire::{BodyDigest, Record};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::{
     App, gateway_error, pool,
-    provider::{Route, Wire},
+    provider::{CarriedCredential, Route, Wire},
     store::{Caller, RequestRow, Usage, now},
-    upstream::{Auth, forward_headers},
+    upstream::{Auth, GATEWAY_KEY, forward_headers},
 };
+
+const TRIES: usize = 2;
 
 pub struct Incoming {
     pub app: App,
@@ -19,16 +21,47 @@ pub struct Incoming {
     pub headers: HeaderMap,
     pub body: Bytes,
     pub wire: Wire,
+    pub id: String,
+    pub carried: Option<CarriedCredential>,
+}
+
+pub struct Plan {
+    pub started: i64,
+    pub request: Value,
+    pub route: Route,
+    pub conversation: Option<String>,
+    pub choices: Vec<Choice>,
+    pub set_aside: Option<String>,
+}
+
+pub enum Choice {
+    Carried(CarriedCredential),
+    Account(pool::Candidate),
 }
 
 pub struct Ready {
     pub started: i64,
     pub request: Value,
     pub route: Route,
-    pub account: String,
+    pub account: Option<String>,
+    pub credential: String,
     pub auth: Auth,
-    pub base_url: Option<String>,
     pub conversation: Option<String>,
+    pub attempts: Vec<Value>,
+}
+
+impl Ready {
+    pub fn first_try(&self) -> bool {
+        !self
+            .attempts
+            .iter()
+            .any(|attempt| attempt.get("account").is_some())
+    }
+}
+
+pub enum Outcome {
+    Served(Response),
+    Refused { response: Response, note: Value },
 }
 
 pub fn pinned_account(incoming: &Incoming) -> Option<String> {
@@ -59,83 +92,196 @@ pub fn pinned_account(incoming: &Incoming) -> Option<String> {
     found
 }
 
-pub async fn admit(incoming: &Incoming, pinned: Option<&str>) -> Result<Ready, Response> {
-    let Incoming {
+pub fn arrive(
+    app: App,
+    caller: Caller,
+    headers: HeaderMap,
+    body: Bytes,
+    wire: Wire,
+) -> Result<Incoming, Box<Response>> {
+    let carried = if headers.contains_key(GATEWAY_KEY) {
+        match app.catalog().recognize(&headers) {
+            None => None,
+            Some(Ok(carried)) => Some(carried),
+            Some(Err(header)) => {
+                return Err(Box::new(reject(
+                    wire,
+                    StatusCode::UNAUTHORIZED,
+                    format!(
+                        "the {header} sent beside your gateway key is not a login this gateway \
+                         knows how to forward, so it was not sent anywhere. Remove it, or send \
+                         only the gateway key"
+                    ),
+                )));
+            }
+        }
+    } else {
+        None
+    };
+    Ok(Incoming {
         app,
-        headers: _,
+        caller,
+        headers,
         body,
         wire,
+        id: crate::request_id(),
+        carried,
+    })
+}
+
+pub fn plan(incoming: &Incoming, pinned: Option<&str>) -> Result<Plan, Box<Response>> {
+    let Incoming {
+        app,
+        caller,
+        body,
+        wire,
+        carried,
         ..
     } = incoming;
-    let started = now();
+    let refuse = |status: StatusCode, message: String| Box::new(reject(*wire, status, message));
 
     let request: Value = serde_json::from_slice(body).map_err(|error| {
-        reject(
-            *wire,
+        refuse(
             StatusCode::BAD_REQUEST,
             format!("the request body is not valid JSON: {error}"),
         )
     })?;
-
     let model = request
         .get("model")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let registered = app
-        .store()
-        .accounts()
-        .map(|accounts| {
-            accounts
-                .into_iter()
-                .map(|account| account.provider)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+
+    let accounts = app.store().accounts().unwrap_or_default();
+    let mut available = Vec::new();
+    let mut preferred = Vec::new();
+    if let Some(carried) = carried {
+        available.push(carried.provider.clone());
+        preferred.push(carried.provider.clone());
+    }
+    for account in &accounts {
+        let yours = account.owner.as_deref() == Some(caller.user_id.as_str());
+        if (yours || account.owner.is_none()) && !available.contains(&account.provider) {
+            available.push(account.provider.clone());
+        }
+        if yours && !preferred.contains(&account.provider) {
+            preferred.push(account.provider.clone());
+        }
+    }
+
     let route = app
         .catalog()
-        .route(*wire, model, &registered)
-        .map_err(|error| reject(*wire, StatusCode::BAD_REQUEST, error.to_string()))?;
-
+        .route_for(*wire, model, &available, &preferred)
+        .map_err(|error| refuse(StatusCode::BAD_REQUEST, error.to_string()))?;
     let conversation = goat_gateway_wire::identify(&request);
-    let prefer = conversation
-        .as_deref()
-        .and_then(|conversation| app.store().account_that_served(conversation).ok().flatten());
 
-    let chosen = pool::pick(
+    let mut set_aside = None;
+    if let Some(carried) = carried {
+        if carried.provider != route.provider {
+            set_aside = Some(format!(
+                "the login sent beside the gateway key is for {}, and this model is served by {}",
+                carried.provider, route.provider
+            ));
+        } else if !carried.may_reach(&route.endpoint.url) {
+            set_aside = Some(format!(
+                "the login sent beside the gateway key may only go to {}, and {} is declared \
+                 elsewhere",
+                carried.hosts.join(", "),
+                route.provider
+            ));
+        } else {
+            return Ok(Plan {
+                started: now(),
+                request,
+                route,
+                conversation,
+                choices: vec![Choice::Carried(carried.clone())],
+                set_aside: None,
+            });
+        }
+    }
+
+    let prefer = conversation.as_deref().and_then(|conversation| {
+        app.store()
+            .account_that_served(conversation, &caller.user_id)
+            .ok()
+            .flatten()
+    });
+    let candidates = pool::candidates(
         app.store(),
         &pool::Want {
             provider: &route.provider,
             scope: route.limit_scope(),
             pinned,
             prefer: prefer.as_deref(),
+            person: Some(&caller.user_id),
+            key: Some(&caller.key_id),
         },
     )
-    .map_err(|error| reject(*wire, StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?;
+    .map_err(|error| refuse(StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?;
 
-    let prepared = crate::oauth::prepare(
-        app.store(),
-        &app.oauth_client(),
-        &chosen.name,
-        &route.provider,
-        &chosen.credential_kind,
-        &chosen.secret,
-    )
-    .await
-    .map_err(|error| reject(*wire, StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?;
+    Ok(Plan {
+        started: now(),
+        request,
+        route,
+        conversation,
+        choices: candidates.into_iter().map(Choice::Account).collect(),
+        set_aside,
+    })
+}
 
-    let auth = match prepared.auth {
-        Auth::ApiKey(secret) => Auth::presented(route.key, secret),
-        carried => carried,
+pub async fn prepare(
+    incoming: &Incoming,
+    plan: &Plan,
+    choice: &Choice,
+    attempts: Vec<Value>,
+) -> Result<Ready, Box<Response>> {
+    let (account, credential, auth) = match choice {
+        Choice::Carried(carried) => (
+            None,
+            "carried".to_owned(),
+            Auth::Carried {
+                header: carried.header.clone(),
+                value: carried.value.clone(),
+            },
+        ),
+        Choice::Account(candidate) => {
+            let unavailable = |message: String| {
+                Box::new(reject(
+                    incoming.wire,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    message,
+                ))
+            };
+            let chosen = pool::load(incoming.app.store(), &candidate.name)
+                .map_err(|error| unavailable(error.to_string()))?;
+            let prepared = crate::oauth::prepare(
+                incoming.app.store(),
+                &incoming.app.oauth_client(),
+                incoming.app.catalog().flow(&plan.route.provider),
+                &chosen.name,
+                &plan.route.provider,
+                &chosen.credential_kind,
+                &chosen.secret,
+            )
+            .await
+            .map_err(|error| unavailable(error.to_string()))?;
+            let auth = match prepared.auth {
+                Auth::ApiKey(secret) => Auth::presented(plan.route.key, secret),
+                carried => carried,
+            };
+            (Some(chosen.name), chosen.credential_kind, auth)
+        }
     };
 
     Ok(Ready {
-        started,
-        request,
-        route,
-        account: chosen.name,
+        started: plan.started,
+        request: plan.request.clone(),
+        route: plan.route.clone(),
+        account,
+        credential,
         auth,
-        base_url: prepared.base_url.map(str::to_owned),
-        conversation,
+        conversation: plan.conversation.clone(),
+        attempts,
     })
 }
 
@@ -160,31 +306,15 @@ pub fn outgoing_headers(
     (headers, edits)
 }
 
-pub fn endpoint_url(ready: &Ready) -> String {
-    match ready.base_url.as_deref() {
-        Some(base) => format!(
-            "{}{}",
-            base.trim_end_matches('/'),
-            path_of(&ready.route.endpoint.url)
-        ),
-        None => ready.route.endpoint.url.clone(),
-    }
-}
-
-fn path_of(url: &str) -> &str {
-    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
-    rest.find('/').map_or("", |at| &rest[at..])
-}
-
 pub fn opened(incoming: &Incoming, ready: &Ready, record: Option<&Record>) -> RequestRow {
     RequestRow {
-        id: crate::request_id(),
+        id: incoming.id.clone(),
         started_at: ready.started,
         person: Some(incoming.caller.user_name.clone()),
         client: crate::messages::client_name(&incoming.headers),
         conversation: ready.conversation.clone(),
         provider: ready.route.provider.clone(),
-        account: Some(ready.account.clone()),
+        account: ready.account.clone(),
         model: ready
             .request
             .get("model")
@@ -205,12 +335,23 @@ pub fn opened(incoming: &Incoming, ready: &Ready, record: Option<&Record>) -> Re
         output_digest: record.map(|record| record.output.short()),
         byte_identical: record.map(Record::is_byte_identical),
         evidence: record.map(|record| {
-            serde_json::json!({
+            json!({
                 "header_edits": record.header_edits,
                 "body_edits": record.body_edits,
             })
         }),
         upstream_request_id: None,
+        user_id: Some(incoming.caller.user_id.clone()),
+        key_id: Some(incoming.caller.key_id.clone()),
+        credential: Some(
+            if ready.account.is_some() {
+                "account"
+            } else {
+                "carried"
+            }
+            .to_owned(),
+        ),
+        attempts: (!ready.attempts.is_empty()).then(|| Value::Array(ready.attempts.clone())),
     }
 }
 
@@ -241,66 +382,144 @@ pub fn sealed_record(
 
 pub async fn dispatch(
     app: App,
-    caller: crate::store::Caller,
+    caller: Caller,
     headers: HeaderMap,
     body: Bytes,
     wire: Wire,
 ) -> Response {
-    let incoming = Incoming {
-        app,
-        caller,
-        headers,
-        body,
-        wire,
+    let incoming = match arrive(app, caller, headers, body, wire) {
+        Ok(incoming) => incoming,
+        Err(response) => return *response,
     };
     let pinned = pinned_account(&incoming);
-    let ready = match admit(&incoming, pinned.as_deref()).await {
-        Ok(ready) => ready,
-        Err(response) => return response,
+    let plan = match plan(&incoming, pinned.as_deref()) {
+        Ok(plan) => plan,
+        Err(response) => return *response,
     };
 
-    let egress = ready.route.endpoint.wire;
-    if wire == egress {
-        return pass(incoming, ready).await;
+    let egress = plan.route.endpoint.wire;
+    let hops = if wire == egress {
+        None
+    } else {
+        match crate::relay_path::path(wire, egress) {
+            Some(hops) => Some(hops),
+            None => {
+                return reject(
+                    wire,
+                    StatusCode::BAD_REQUEST,
+                    format!("this gateway cannot turn {wire} into {egress}"),
+                );
+            }
+        }
+    };
+
+    let mut attempts: Vec<Value> = plan
+        .set_aside
+        .iter()
+        .map(|why| json!({ "carried": "set aside", "why": why }))
+        .collect();
+    let tries = plan.choices.len().min(TRIES);
+    for (index, choice) in plan.choices.iter().take(TRIES).enumerate() {
+        let ready = match prepare(&incoming, &plan, choice, attempts.clone()).await {
+            Ok(ready) => ready,
+            Err(response) => return *response,
+        };
+        let outcome = match hops {
+            None => pass(&incoming, ready).await,
+            Some(hops) => crate::translate::run(&incoming, ready, hops).await,
+        };
+        match outcome {
+            Outcome::Served(response) => return response,
+            Outcome::Refused { response, note } => {
+                if index + 1 >= tries {
+                    return response;
+                }
+                attempts.push(note);
+            }
+        }
     }
-    match crate::relay_path::path(wire, egress) {
-        Some(hops) => crate::translate::run(incoming, ready, hops).await,
-        None => reject(
-            wire,
+    gateway_error("no account was left to try".to_owned())
+}
+
+pub async fn count_tokens(app: App, caller: Caller, headers: HeaderMap, body: Bytes) -> Response {
+    let incoming = match arrive(app, caller, headers, body, Wire::Messages) {
+        Ok(incoming) => incoming,
+        Err(response) => return *response,
+    };
+    let plan = match plan(&incoming, None) {
+        Ok(plan) => plan,
+        Err(response) => return *response,
+    };
+    if plan.route.endpoint.wire != Wire::Messages {
+        return reject(
+            Wire::Messages,
             StatusCode::BAD_REQUEST,
-            format!("this gateway cannot turn {wire} into {egress}"),
-        ),
+            format!(
+                "counting tokens needs a provider that serves the Messages format, and {} serves \
+                 this model in the {} format",
+                plan.route.provider, plan.route.endpoint.wire
+            ),
+        );
+    }
+    let Some(choice) = plan.choices.first() else {
+        return gateway_error("no account was left to try".to_owned());
+    };
+    let ready = match prepare(&incoming, &plan, choice, Vec::new()).await {
+        Ok(ready) => ready,
+        Err(response) => return *response,
+    };
+
+    let (headers, _) = outgoing_headers(&incoming, &ready);
+    let sent = incoming
+        .app
+        .inner
+        .client
+        .post(format!(
+            "{}/count_tokens",
+            ready.route.endpoint.url.trim_end_matches('/')
+        ))
+        .headers(headers)
+        .body(incoming.body.clone())
+        .send()
+        .await;
+    match sent {
+        Ok(response) => crate::relay_metered(response, None),
+        Err(error) => gateway_error(format!("upstream unreachable: {error}")),
     }
 }
 
-async fn pass(incoming: Incoming, ready: Ready) -> Response {
-    let (outgoing, body_edits) = match prepare_body(&incoming, &ready) {
+async fn pass(incoming: &Incoming, ready: Ready) -> Outcome {
+    let (outgoing, body_edits) = match prepare_body(incoming, &ready) {
         Ok(prepared) => prepared,
         Err(error) => {
-            return reject(
+            return Outcome::Served(reject(
                 incoming.wire,
                 StatusCode::BAD_REQUEST,
                 format!("could not prepare the request: {error}"),
-            );
+            ));
         }
     };
-    let (headers, header_edits) = outgoing_headers(&incoming, &ready);
-    let record = match sealed_record(&incoming, &outgoing, body_edits, header_edits) {
+    let (headers, header_edits) = outgoing_headers(incoming, &ready);
+    let record = match sealed_record(incoming, &outgoing, body_edits, header_edits) {
         Ok(record) => record,
         Err(error) => {
-            return gateway_error(format!("refusing to send an unverified request: {error}"));
+            return Outcome::Served(gateway_error(format!(
+                "refusing to send an unverified request: {error}"
+            )));
         }
     };
 
-    let mut row = opened(&incoming, &ready, Some(&record));
+    let mut row = opened(incoming, &ready, Some(&record));
     let _ = incoming.app.store().record_request(&row);
-    announce_open(&incoming.app, &row);
+    if ready.first_try() {
+        announce_open(&incoming.app, &row);
+    }
 
     let sent = incoming
         .app
         .inner
         .client
-        .post(endpoint_url(&ready))
+        .post(&ready.route.endpoint.url)
         .headers(headers)
         .body(outgoing)
         .send()
@@ -308,11 +527,10 @@ async fn pass(incoming: Incoming, ready: Ready) -> Response {
 
     let response = match sent {
         Ok(response) => response,
-        Err(error) => return gateway_error(format!("upstream unreachable: {error}")),
+        Err(error) => {
+            return Outcome::Served(unreachable(&incoming.app, row, ready.started, error));
+        }
     };
-
-    let status = response.status().as_u16();
-    crate::observe(&incoming.app, &ready.account, status, response.headers());
 
     row.ttft_ms = Some(now() - ready.started);
     row.upstream_request_id = response
@@ -321,28 +539,119 @@ async fn pass(incoming: Incoming, ready: Ready) -> Response {
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
 
+    let status = response.status().as_u16();
     if !(200..300).contains(&status) {
-        let (relayed, said) = crate::relay_failure(response).await;
-        row.status = "error".into();
-        row.error_kind = Some(format!("http_{status}"));
-        row.error_message = said;
-        row.duration_ms = Some(now() - ready.started);
-        let _ = incoming.app.store().record_request(&row);
-        return relayed;
+        return answered_with_failure(incoming, &ready, row, response).await;
     }
 
+    if let Some(account) = &ready.account {
+        crate::observe(&incoming.app, account, status, response.headers());
+        crate::quota::refresh_soon(&incoming.app, account, &ready.route.provider);
+    }
     let _ = incoming.app.store().record_request(&row);
 
-    let price = ready.route.price();
-    crate::relay_metered(
+    Outcome::Served(crate::relay_metered(
         response,
         Some(crate::Settle {
-            app: incoming.app,
+            app: incoming.app.clone(),
             row,
             started: ready.started,
-            price,
+            price: ready.route.price(),
         }),
-    )
+    ))
+}
+
+pub async fn answered_with_failure(
+    incoming: &Incoming,
+    ready: &Ready,
+    mut row: RequestRow,
+    response: reqwest::Response,
+) -> Outcome {
+    let status = response.status().as_u16();
+    let headers = response.headers().clone();
+    let failure = crate::relay_failure(response).await;
+
+    row.status = "error".into();
+    row.error_kind = Some(format!("http_{status}"));
+    row.error_message = failure.said.clone();
+    row.duration_ms = Some(now() - ready.started);
+
+    let Some(account) = &ready.account else {
+        settle_failure(&incoming.app, &row);
+        return Outcome::Served(failure.relayed);
+    };
+
+    let snapshot = crate::observe_limits(&incoming.app, account, &headers);
+    let refusal = incoming
+        .app
+        .catalog()
+        .get(&ready.route.provider)
+        .and_then(|provider| {
+            provider
+                .refusal(
+                    status,
+                    &failure.body,
+                    failure.said.as_deref(),
+                    &ready.credential,
+                )
+                .cloned()
+        });
+
+    match refusal {
+        Some(refusal) => {
+            let cause = failure
+                .said
+                .clone()
+                .unwrap_or_else(|| format!("refused with {status}"));
+            let until = now() + i64::from(refusal.demote_minutes) * 60_000;
+            let _ =
+                incoming
+                    .app
+                    .store()
+                    .demote(&incoming.caller.key_id, account, Some(until), &cause);
+            row.error_kind = Some("refused".into());
+            settle_failure(&incoming.app, &row);
+            Outcome::Refused {
+                response: failure.relayed,
+                note: json!({
+                    "account": account,
+                    "status": status,
+                    "said": failure.said,
+                }),
+            }
+        }
+        None => {
+            crate::judge(&incoming.app, account, status, &headers, &snapshot);
+            settle_failure(&incoming.app, &row);
+            Outcome::Served(failure.relayed)
+        }
+    }
+}
+
+pub fn settle_failure(app: &App, row: &RequestRow) {
+    let _ = app.store().record_request(row);
+    app.announcer()
+        .say(crate::events::Happening::RequestSettled {
+            id: row.id.clone(),
+            status: row.status.clone(),
+            duration_ms: row.duration_ms,
+            cost_micros: None,
+        });
+}
+
+pub fn unreachable(
+    app: &App,
+    mut row: RequestRow,
+    started: i64,
+    error: reqwest::Error,
+) -> Response {
+    let message = format!("upstream unreachable: {error}");
+    row.status = "error".into();
+    row.error_kind = Some("unreachable".into());
+    row.error_message = Some(message.clone());
+    row.duration_ms = Some(now() - started);
+    settle_failure(app, &row);
+    gateway_error(message)
 }
 
 pub fn announce_open(app: &App, row: &RequestRow) {
@@ -356,17 +665,17 @@ pub fn announce_open(app: &App, row: &RequestRow) {
 }
 
 pub fn reject(wire: Wire, status: StatusCode, message: String) -> Response {
-    let kind = if status == StatusCode::SERVICE_UNAVAILABLE {
-        "api_error"
-    } else {
-        "invalid_request_error"
+    let kind = match status {
+        StatusCode::SERVICE_UNAVAILABLE => "api_error",
+        StatusCode::UNAUTHORIZED => "authentication_error",
+        _ => "invalid_request_error",
     };
     let body = match wire {
-        Wire::Messages => serde_json::json!({
+        Wire::Messages => json!({
             "type": "error",
             "error": { "type": kind, "message": message },
         }),
-        Wire::Responses | Wire::Chat => serde_json::json!({
+        Wire::Responses | Wire::Chat => json!({
             "error": {
                 "type": kind,
                 "message": message,

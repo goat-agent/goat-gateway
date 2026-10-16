@@ -1,5 +1,5 @@
 use goat_gateway_wire::{
-    Envelopes, Mapping, TranslateError, Translated, chat_to_messages, messages_to_chat,
+    Envelopes, Mapping, Provenance, TranslateError, Translated, chat_to_messages, messages_to_chat,
     messages_to_responses, responses_to_messages,
 };
 
@@ -10,6 +10,7 @@ pub enum Hop {
     ResponsesToMessages,
     MessagesToChat,
     ChatToMessages,
+    MessagesToResponses,
 }
 
 pub fn path(from: Wire, to: Wire) -> Option<&'static [Hop]> {
@@ -18,6 +19,8 @@ pub fn path(from: Wire, to: Wire) -> Option<&'static [Hop]> {
         (Wire::Messages, Wire::Chat) => Some(&[Hop::MessagesToChat]),
         (Wire::Chat, Wire::Messages) => Some(&[Hop::ChatToMessages]),
         (Wire::Responses, Wire::Chat) => Some(&[Hop::ResponsesToMessages, Hop::MessagesToChat]),
+        (Wire::Messages, Wire::Responses) => Some(&[Hop::MessagesToResponses]),
+        (Wire::Chat, Wire::Responses) => Some(&[Hop::ChatToMessages, Hop::MessagesToResponses]),
         _ => None,
     }
 }
@@ -27,6 +30,7 @@ pub struct Ask<'a> {
     pub reasoning: Option<responses_to_messages::Target>,
     pub default_max_tokens: u32,
     pub envelopes: &'a Envelopes,
+    pub provenance: &'a Provenance,
 }
 
 pub fn needs_reasoning_declared(hops: &[Hop]) -> bool {
@@ -56,6 +60,14 @@ pub fn carry(body: &[u8], hops: &[Hop], ask: &Ask<'_>) -> Result<Translated, Tra
                     default_max_tokens: ask.default_max_tokens,
                 },
             )?,
+            Hop::MessagesToResponses => messages_to_responses::translate(
+                &carried,
+                &messages_to_responses::RequestTarget {
+                    model: ask.model.to_owned(),
+                    provenance: ask.provenance.clone(),
+                },
+                ask.envelopes,
+            )?,
         };
         carried = step.body;
         mapping.absorb(step.mapping);
@@ -75,6 +87,11 @@ pub enum Back {
         chat_to_messages::StreamTranslator,
         Box<messages_to_responses::StreamTranslator>,
     ),
+    ResponsesToMessages(Box<responses_to_messages::StreamTranslator>),
+    ResponsesToChat(
+        Box<responses_to_messages::StreamTranslator>,
+        messages_to_chat::StreamTranslator,
+    ),
 }
 
 impl Back {
@@ -82,6 +99,8 @@ impl Back {
         match self {
             Self::ChatToMessages(one) => Some(one.assembled()),
             Self::MessagesToChat(one) => Some(one.assembled()),
+            Self::ResponsesToMessages(one) => Some(one.assembled()),
+            Self::ResponsesToChat(_, then) => Some(then.assembled()),
             Self::MessagesToResponses(_) | Self::ChatToResponses(..) => None,
         }
     }
@@ -92,6 +111,11 @@ impl Back {
             Self::MessagesToChat(one) => one.push(chunk),
             Self::MessagesToResponses(one) => one.push(chunk),
             Self::ChatToResponses(first, then) => {
+                let middle = first.push(chunk);
+                then.push(&middle)
+            }
+            Self::ResponsesToMessages(one) => one.push(chunk),
+            Self::ResponsesToChat(first, then) => {
                 let middle = first.push(chunk);
                 then.push(&middle)
             }
@@ -109,6 +133,13 @@ impl Back {
                 out.extend(then.finish());
                 out
             }
+            Self::ResponsesToMessages(one) => one.finish(),
+            Self::ResponsesToChat(first, then) => {
+                let middle = first.finish();
+                let mut out = then.push(&middle);
+                out.extend(then.finish());
+                out
+            }
         }
     }
 }
@@ -120,7 +151,7 @@ mod tests {
     #[test]
     fn every_provider_this_gateway_ships_can_be_reached_from_every_door() {
         for from in [Wire::Messages, Wire::Responses, Wire::Chat] {
-            for serves in [Wire::Messages, Wire::Chat] {
+            for serves in [Wire::Messages, Wire::Responses, Wire::Chat] {
                 assert!(
                     from == serves || path(from, serves).is_some(),
                     "a {from} request has no way to reach a provider that serves {serves}"
@@ -130,9 +161,15 @@ mod tests {
     }
 
     #[test]
-    fn a_responses_only_provider_is_reached_by_speaking_responses() {
-        assert_eq!(path(Wire::Chat, Wire::Responses), None);
-        assert_eq!(path(Wire::Messages, Wire::Responses), None);
+    fn a_responses_only_provider_is_reached_through_messages() {
+        assert_eq!(
+            path(Wire::Chat, Wire::Responses),
+            Some(&[Hop::ChatToMessages, Hop::MessagesToResponses][..])
+        );
+        assert_eq!(
+            path(Wire::Messages, Wire::Responses),
+            Some(&[Hop::MessagesToResponses][..])
+        );
     }
 
     #[test]

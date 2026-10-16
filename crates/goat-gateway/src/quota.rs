@@ -26,7 +26,8 @@ impl Asked {
 }
 
 pub fn refresh_soon(app: &App, account: &str, provider: &str) {
-    let Some(declared) = app.catalog().get(provider) else {
+    let catalog = app.catalog();
+    let Some(declared) = catalog.get(provider) else {
         return;
     };
     let Limits::Endpoint(asked) = declared.limits.clone() else {
@@ -68,6 +69,7 @@ async fn ask(
     let prepared = crate::oauth::prepare(
         app.store(),
         &app.oauth_client(),
+        app.catalog().flow(&row.provider),
         account,
         provider,
         &row.credential_kind,

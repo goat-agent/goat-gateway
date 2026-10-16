@@ -68,11 +68,19 @@ someone else's terminal.
 - **Never poll a provider on a timer.** Quota is read from responses to requests that were
   going to happen anyway; endpoint-based quota is asked at most once a minute per account, on
   the back of real traffic.
+- **Never impersonate a client.** No forged User-Agent, `cch`, TLS fingerprint, or identity
+  line in a system prompt. A program's request reaches the provider as that program sent it;
+  whether the provider bills it to a plan is the provider's call, not ours.
+- **A plan belongs to one person.** A sign-in always has an owner and is never offered to
+  anyone else. API keys may be shared. Routing only ever considers what the caller owns or what
+  is shared with everyone.
 
 ## Adding things
 
-- **A provider** is a TOML entry in `crates/goat-gateway/src/provider/builtin.toml`. No Rust.
-  If it needs Rust, the declaration is missing a field — add the field.
+- **A provider** is a TOML entry in `crates/goat-gateway/src/provider/builtin.toml`, sign-in
+  included (`[provider.x.sign_in]`). No Rust. If it needs Rust, the declaration is missing a
+  field — add the field. The console writes `config.toml` with the same schema and reloads it
+  in place.
 - **A format** needs two translators, to and from Messages, plus entries in
   `crates/goat-gateway/src/relay_path.rs`. Everything else composes through the hub. Do not
   add a direct translator for a pair a two-hop path already covers.

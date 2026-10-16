@@ -40,6 +40,8 @@ pub struct AccountRow {
     pub state: AccountState,
     pub cooldown_until: Option<i64>,
     pub created_at: i64,
+    pub owner: Option<String>,
+    pub owner_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -51,7 +53,7 @@ pub struct Usage {
     pub reasoning_tokens: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct RequestRow {
     pub id: String,
     pub started_at: i64,
@@ -76,6 +78,18 @@ pub struct RequestRow {
     pub byte_identical: Option<bool>,
     pub evidence: Option<serde_json::Value>,
     pub upstream_request_id: Option<String>,
+    pub user_id: Option<String>,
+    pub key_id: Option<String>,
+    pub credential: Option<String>,
+    pub attempts: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Demotion {
+    pub account: String,
+    pub until: Option<i64>,
+    pub cause: String,
+    pub set_at: i64,
 }
 
 impl Store {
@@ -103,6 +117,25 @@ impl Store {
         Ok(())
     }
 
+    pub fn replace_secret(&self, name: &str, secret: &[u8]) -> Result<(), StoreError> {
+        let (ciphertext, nonce) = self.seal(secret);
+        let connection = self.connection.lock().expect("store mutex");
+        connection.execute(
+            "UPDATE accounts SET secret = ?2, nonce = ?3 WHERE name = ?1",
+            params![name, ciphertext, nonce],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_owner(&self, name: &str, owner: Option<&str>) -> Result<(), StoreError> {
+        let connection = self.connection.lock().expect("store mutex");
+        connection.execute(
+            "UPDATE accounts SET owner = ?2 WHERE name = ?1",
+            params![name, owner],
+        )?;
+        Ok(())
+    }
+
     pub fn secret(&self, name: &str) -> Result<Vec<u8>, StoreError> {
         let connection = self.connection.lock().expect("store mutex");
         let row: Option<(Vec<u8>, Vec<u8>)> = connection
@@ -121,8 +154,10 @@ impl Store {
     pub fn accounts(&self) -> Result<Vec<AccountRow>, StoreError> {
         let connection = self.connection.lock().expect("store mutex");
         let mut statement = connection.prepare(
-            "SELECT name, provider, credential_kind, state, cooldown_until, created_at
-             FROM accounts ORDER BY provider, name",
+            "SELECT a.name, a.provider, a.credential_kind, a.state, a.cooldown_until, a.created_at,
+                    a.owner, u.name
+             FROM accounts a LEFT JOIN users u ON u.id = a.owner
+             ORDER BY a.provider, a.name",
         )?;
         let rows = statement
             .query_map([], |row| {
@@ -133,6 +168,8 @@ impl Store {
                     state: AccountState::parse(&row.get::<_, String>(3)?),
                     cooldown_until: row.get(4)?,
                     created_at: row.get(5)?,
+                    owner: row.get(6)?,
+                    owner_name: row.get(7)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -177,15 +214,18 @@ impl Store {
                  ingress, egress, translated, status, error_kind, error_message,
                  ttft_ms, duration_ms,
                  input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
-                 cost_micros, input_digest, output_digest, byte_identical, evidence, upstream_request_id
+                 cost_micros, input_digest, output_digest, byte_identical, evidence, upstream_request_id,
+                 user_id, key_id, credential, attempts
              ) VALUES (
                  ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
                  ?9, ?10, ?11, ?12, ?13, ?14,
                  ?15, ?16,
                  ?17, ?18, ?19, ?20, ?21,
-                 ?22, ?23, ?24, ?25, ?26, ?27
+                 ?22, ?23, ?24, ?25, ?26, ?27,
+                 ?28, ?29, ?30, ?31
              )
              ON CONFLICT(id) DO UPDATE SET
+                 account = excluded.account,
                  status = excluded.status,
                  error_kind = excluded.error_kind,
                  error_message = excluded.error_message,
@@ -197,8 +237,13 @@ impl Store {
                  cache_write_tokens = excluded.cache_write_tokens,
                  reasoning_tokens = excluded.reasoning_tokens,
                  cost_micros = excluded.cost_micros,
+                 input_digest = excluded.input_digest,
+                 output_digest = excluded.output_digest,
+                 byte_identical = excluded.byte_identical,
                  evidence = excluded.evidence,
-                 upstream_request_id = excluded.upstream_request_id",
+                 upstream_request_id = excluded.upstream_request_id,
+                 credential = excluded.credential,
+                 attempts = excluded.attempts",
             params![
                 row.id,
                 row.started_at,
@@ -227,19 +272,27 @@ impl Store {
                 row.byte_identical.map(|flag| flag as i64),
                 row.evidence.as_ref().map(ToString::to_string),
                 row.upstream_request_id,
+                row.user_id,
+                row.key_id,
+                row.credential,
+                row.attempts.as_ref().map(ToString::to_string),
             ],
         )?;
         Ok(())
     }
 
-    pub fn account_that_served(&self, conversation: &str) -> Result<Option<String>, StoreError> {
+    pub fn account_that_served(
+        &self,
+        conversation: &str,
+        user_id: &str,
+    ) -> Result<Option<String>, StoreError> {
         let connection = self.connection.lock().expect("store mutex");
         let account = connection
             .query_row(
                 "SELECT account FROM requests
-                 WHERE conversation = ?1 AND account IS NOT NULL AND status = 'ok'
+                 WHERE conversation = ?1 AND user_id = ?2 AND account IS NOT NULL AND status = 'ok'
                  ORDER BY started_at DESC LIMIT 1",
-                params![conversation],
+                params![conversation, user_id],
                 |row| row.get(0),
             )
             .optional()?;
@@ -261,7 +314,8 @@ impl Store {
 pub(crate) const REQUEST_COLUMNS: &str = "id, started_at, person, client, conversation, provider, \
      account, model, ingress, egress, translated, status, error_kind, error_message, ttft_ms, duration_ms, \
      input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, \
-     cost_micros, input_digest, output_digest, byte_identical, evidence, upstream_request_id";
+     cost_micros, input_digest, output_digest, byte_identical, evidence, upstream_request_id, \
+     user_id, key_id, credential, attempts";
 
 pub(crate) fn read_request(row: &rusqlite::Row<'_>) -> rusqlite::Result<RequestRow> {
     {
@@ -298,12 +352,64 @@ pub(crate) fn read_request(row: &rusqlite::Row<'_>) -> rusqlite::Result<RequestR
                     .get::<_, Option<String>>(25)?
                     .and_then(|text| serde_json::from_str(&text).ok()),
                 upstream_request_id: row.get(26)?,
+                user_id: row.get(27)?,
+                key_id: row.get(28)?,
+                credential: row.get(29)?,
+                attempts: row
+                    .get::<_, Option<String>>(30)?
+                    .and_then(|text| serde_json::from_str(&text).ok()),
             })
         }
     }
 }
 
 impl Store {
+    pub fn demote(
+        &self,
+        key_id: &str,
+        account: &str,
+        until: Option<i64>,
+        cause: &str,
+    ) -> Result<(), StoreError> {
+        let connection = self.connection.lock().expect("store mutex");
+        connection.execute(
+            "INSERT INTO demotions (key_id, account, until, cause, set_at) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(key_id, account) DO UPDATE SET
+                 until = excluded.until, cause = excluded.cause, set_at = excluded.set_at",
+            params![key_id, account, until, cause, now()],
+        )?;
+        Ok(())
+    }
+
+    pub fn undemote(&self, key_id: &str, account: &str) -> Result<(), StoreError> {
+        let connection = self.connection.lock().expect("store mutex");
+        connection.execute(
+            "DELETE FROM demotions WHERE key_id = ?1 AND account = ?2",
+            params![key_id, account],
+        )?;
+        Ok(())
+    }
+
+    pub fn demotions(&self, key_id: &str) -> Result<Vec<Demotion>, StoreError> {
+        let connection = self.connection.lock().expect("store mutex");
+        let mut statement = connection.prepare(
+            "SELECT account, until, cause, set_at FROM demotions
+             WHERE key_id = ?1 AND (until IS NULL OR until > ?2)
+             ORDER BY account",
+        )?;
+        let rows = statement
+            .query_map(params![key_id, now()], |row| {
+                Ok(Demotion {
+                    account: row.get(0)?,
+                    until: row.get(1)?,
+                    cause: row.get(2)?,
+                    set_at: row.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     pub fn set_rate_limits(
         &self,
         account: &str,
@@ -362,11 +468,24 @@ impl Store {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn store() -> Store {
         Store::in_memory(&[2u8; 32]).unwrap()
+    }
+
+    pub(crate) fn row(id: &str, provider: &str, status: &str) -> RequestRow {
+        RequestRow {
+            id: id.to_owned(),
+            started_at: now(),
+            provider: provider.to_owned(),
+            model: "claude-sonnet-5".into(),
+            ingress: "messages".into(),
+            egress: "messages".into(),
+            status: status.to_owned(),
+            ..RequestRow::default()
+        }
     }
 
     #[test]
@@ -494,6 +613,7 @@ mod tests {
                     byte_identical: Some(false),
                     evidence: None,
                     upstream_request_id: None,
+                    ..RequestRow::default()
                 })
                 .unwrap();
         }

@@ -14,7 +14,10 @@ const NEVER_FORWARD: &[&str] = &[
     "content-length",
     "authorization",
     "x-api-key",
+    GATEWAY_KEY,
 ];
+
+pub const GATEWAY_KEY: &str = "x-gateway-key";
 
 #[derive(Debug, Clone)]
 pub struct Upstream {
@@ -34,6 +37,7 @@ pub enum Auth {
     ApiKey(String),
     Bearer(String),
     Oauth(Oauth),
+    Carried { header: String, value: String },
 }
 
 impl std::fmt::Debug for Auth {
@@ -42,6 +46,7 @@ impl std::fmt::Debug for Auth {
             Self::ApiKey(_) => f.write_str("ApiKey(***)"),
             Self::Bearer(_) => f.write_str("Bearer(***)"),
             Self::Oauth(_) => f.write_str("Oauth(***)"),
+            Self::Carried { .. } => f.write_str("Carried(***)"),
         }
     }
 }
@@ -54,19 +59,24 @@ impl Auth {
         }
     }
 
-    fn header(&self) -> (HeaderName, HeaderValue, HeaderEdit) {
+    fn header(&self) -> Option<(HeaderName, HeaderValue, Option<HeaderEdit>)> {
         match self {
-            Self::ApiKey(key) => (
+            Self::ApiKey(key) => Some((
                 HeaderName::from_static("x-api-key"),
                 HeaderValue::from_str(key).unwrap_or_else(|_| HeaderValue::from_static("")),
-                HeaderEdit::new("x-api-key"),
-            ),
-            Self::Bearer(token) | Self::Oauth(Oauth { token, .. }) => (
+                Some(HeaderEdit::new("x-api-key")),
+            )),
+            Self::Bearer(token) | Self::Oauth(Oauth { token, .. }) => Some((
                 HeaderName::from_static("authorization"),
                 HeaderValue::from_str(&format!("Bearer {token}"))
                     .unwrap_or_else(|_| HeaderValue::from_static("")),
-                HeaderEdit::new("authorization"),
-            ),
+                Some(HeaderEdit::new("authorization")),
+            )),
+            Self::Carried { header, value } => Some((
+                HeaderName::from_bytes(header.as_bytes()).ok()?,
+                HeaderValue::from_str(value).ok()?,
+                None,
+            )),
         }
     }
 }
@@ -93,9 +103,14 @@ pub fn forward_headers(incoming: &HeaderMap, auth: &Auth) -> (HeaderMap, Vec<Hea
         out.append(name.clone(), value.clone());
     }
 
-    let (name, value, edit) = auth.header();
-    out.insert(name, value);
-    let mut edits = vec![edit];
+    let mut edits = Vec::new();
+    if let Some((name, value, edit)) = auth.header() {
+        out.insert(name, value);
+        edits.extend(edit);
+    }
+    if incoming.contains_key(GATEWAY_KEY) {
+        edits.push(HeaderEdit::new(GATEWAY_KEY));
+    }
 
     if let Auth::Oauth(oauth) = auth {
         if let Some(required) = oauth.merge_beta.as_deref() {
@@ -226,6 +241,26 @@ mod tests {
         assert!(!out.contains_key("authorization"));
         assert_eq!(out["x-api-key"], "provider-key");
         assert_eq!(edits, vec![HeaderEdit::new("x-api-key")]);
+    }
+
+    #[test]
+    fn a_carried_login_goes_out_as_it_came_and_the_gateway_key_stays_home() {
+        let incoming = headers(&[
+            ("authorization", "Bearer sk-ant-oat01-own"),
+            ("x-gateway-key", "gwk_mine"),
+        ]);
+        let auth = Auth::Carried {
+            header: "authorization".into(),
+            value: "Bearer sk-ant-oat01-own".into(),
+        };
+        let (out, edits) = forward_headers(&incoming, &auth);
+        assert_eq!(out["authorization"], "Bearer sk-ant-oat01-own");
+        assert!(!out.contains_key("x-gateway-key"));
+        assert_eq!(
+            edits,
+            vec![HeaderEdit::new("x-gateway-key")],
+            "removing our own key is an edit; resending the client's login unchanged is not"
+        );
     }
 
     #[test]

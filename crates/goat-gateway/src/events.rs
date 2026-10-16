@@ -49,6 +49,17 @@ impl Default for Announcer {
     }
 }
 
+impl Happening {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::RequestOpened { .. } => "request_opened",
+            Self::RequestSettled { .. } => "request_settled",
+            Self::AccountChanged { .. } => "account_changed",
+            Self::LimitsObserved { .. } => "limits_observed",
+        }
+    }
+}
+
 impl Announcer {
     pub fn say(&self, happening: Happening) {
         let _ = self.channel.send(happening);
@@ -68,11 +79,20 @@ impl Announcer {
     }
 }
 
-pub async fn stream(State(app): State<crate::App>) -> Response {
-    let happenings = app.announcer().listen().map(|happening| {
+pub async fn stream(
+    State(app): State<crate::App>,
+    axum::Extension(viewer): axum::Extension<crate::store::Viewer>,
+) -> Response {
+    let everything = viewer.is_admin();
+    let happenings = app.announcer().listen().map(move |happening| {
+        let told = if everything {
+            serde_json::to_value(&happening).unwrap_or_default()
+        } else {
+            serde_json::json!({ "happened": happening.kind() })
+        };
         Ok::<_, std::convert::Infallible>(
             Event::default()
-                .json_data(&happening)
+                .json_data(&told)
                 .unwrap_or_else(|_| Event::default().comment("unencodable")),
         )
     });

@@ -12,6 +12,7 @@ pub struct Reached {
     pub ok: bool,
     pub status: u16,
     pub model: Option<String>,
+    pub checked: Option<String>,
     pub said: Option<String>,
     pub took_ms: i64,
 }
@@ -39,8 +40,8 @@ pub async fn reach(app: &App, account: &str) -> Result<Reached, ProbeError> {
         .find(|row| row.name == account)
         .ok_or_else(|| ProbeError::Unknown(account.to_owned()))?;
 
-    let provider = app
-        .catalog()
+    let catalog = app.catalog();
+    let provider = catalog
         .get(&row.provider)
         .ok_or_else(|| ProbeError::Nowhere {
             provider: row.provider.clone(),
@@ -57,6 +58,7 @@ pub async fn reach(app: &App, account: &str) -> Result<Reached, ProbeError> {
     let prepared = crate::oauth::prepare(
         app.store(),
         &app.oauth_client(),
+        app.catalog().flow(&row.provider),
         account,
         &row.provider,
         &row.credential_kind,
@@ -85,15 +87,35 @@ pub async fn reach(app: &App, account: &str) -> Result<Reached, ProbeError> {
         axum::http::HeaderValue::from_static("application/json"),
     );
 
-    let url = match prepared.base_url {
-        Some(base) => format!("{}{}", base.trim_end_matches('/'), path_of(&endpoint.url)),
-        None => endpoint.url.clone(),
-    };
+    if let Some(check) = &provider.check {
+        let answered = app
+            .inner
+            .client
+            .get(check)
+            .headers(headers)
+            .send()
+            .await
+            .map_err(|error| ProbeError::Unreachable(error.to_string()))?;
+        let status = answered.status().as_u16();
+        if status == 401 {
+            crate::observe(app, account, status, answered.headers());
+        }
+        let body = answered.bytes().await.unwrap_or_default();
+        return Ok(settled(
+            app,
+            &row,
+            status,
+            None,
+            Some(check.clone()),
+            &body,
+            started,
+        ));
+    }
 
     let sent = app
         .inner
         .client
-        .post(url)
+        .post(&endpoint.url)
         .headers(headers)
         .body(serde_json::to_vec(&knock(endpoint, model.as_deref())).unwrap_or_default())
         .send()
@@ -102,24 +124,40 @@ pub async fn reach(app: &App, account: &str) -> Result<Reached, ProbeError> {
 
     let status = sent.status().as_u16();
     crate::observe(app, account, status, sent.headers());
-
     let body = sent.bytes().await.unwrap_or_default();
+    Ok(settled(app, &row, status, model, None, &body, started))
+}
+
+fn settled(
+    app: &App,
+    row: &crate::store::AccountRow,
+    status: u16,
+    model: Option<String>,
+    checked: Option<String>,
+    body: &[u8],
+    started: i64,
+) -> Reached {
     let ok = (200..300).contains(&status);
     if ok && row.state == AccountState::SignInExpired {
-        let _ = app.store().set_state(account, AccountState::Active, None);
+        let _ = app.store().set_state(&row.name, AccountState::Active, None);
     }
-
-    Ok(Reached {
+    Reached {
         ok,
         status,
         model,
-        said: (!ok).then(|| complaint(&body)).flatten(),
+        checked,
+        said: (!ok).then(|| complaint(body)).flatten(),
         took_ms: now() - started,
-    })
+    }
 }
 
 fn knock(endpoint: &Endpoint, model: Option<&str>) -> Value {
     let model = model.unwrap_or("");
+    if let Some(declared) = &endpoint.knock {
+        let mut body = declared.clone();
+        body.insert("model".to_owned(), json!(model));
+        return Value::Object(body);
+    }
     match endpoint.wire {
         Wire::Messages => json!({
             "model": model,
@@ -133,11 +171,6 @@ fn knock(endpoint: &Endpoint, model: Option<&str>) -> Value {
             "messages": [{ "role": "user", "content": "." }],
         }),
     }
-}
-
-fn path_of(url: &str) -> &str {
-    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
-    rest.find('/').map_or("", |at| &rest[at..])
 }
 
 fn complaint(body: &[u8]) -> Option<String> {

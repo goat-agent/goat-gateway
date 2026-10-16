@@ -371,7 +371,7 @@ async fn a_model_with_no_published_price_costs_nothing_rather_than_zero() {
     let (status, _) = call(
         &harness,
         json!({
-            "model": "claude-fable-5",
+            "model": "claude-haiku-5-5",
             "stream": true,
             "input": [{ "type": "message", "role": "user", "content": "hello" }],
         }),
