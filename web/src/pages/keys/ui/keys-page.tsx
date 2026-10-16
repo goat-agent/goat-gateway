@@ -1,12 +1,14 @@
 import { useState } from "react";
-import { KeyRound, Plus, Trash2, UserPlus, Users } from "lucide-react";
+import { ArrowDownToLine, KeyRound, MoreHorizontal, Plug, Plus, Trash2 } from "lucide-react";
 import {
   Badge,
   Body,
   Button,
-  Group,
+  Dialog,
   Head,
-  Input,
+  Menu,
+  MenuItem,
+  MenuSeparator,
   Nothing,
   Page,
   Row,
@@ -15,50 +17,41 @@ import {
   rowHover,
   toast,
 } from "@/shared/ui";
-import { drop, tell, useResource } from "@/shared/api";
+import { drop, useResource } from "@/shared/api";
 import { useCommand } from "@/shared/model/commands";
-import type { Key, User } from "@/entities/user";
-import { ago, day, UNKNOWN } from "@/shared/lib/format";
-import { IssueKey } from "@/features/issue-key";
+import { useMe, type Key, type User } from "@/entities/user";
+import { ago, day } from "@/shared/lib/format";
+import { ConnectGuide, IssueKey } from "@/features/issue-key";
+import { KeyDemotions } from "@/features/key-demotions";
 
-const LIST =
-  "[&_td:first-child]:pl-5 [&_td:last-child]:pr-3 [&_th:first-child]:pl-5 [&_th:last-child]:pr-3 [&_thead_th]:border-t-0";
-
-const REVEALED =
-  "opacity-0 group-hover:opacity-100 focus-visible:opacity-100 group-data-[popup-open]:opacity-100";
+const COLUMNS = 5;
 
 export function KeysPage() {
-  const users = useResource<{ users: User[] }>("/api/users");
+  const me = useMe((store) => store.me);
+  const admin = me?.admin ?? false;
+  const users = useResource<{ users: User[] }>(admin ? "/api/users" : undefined);
   const keys = useResource<{ keys: Key[] }>("/api/keys");
 
   const [issuing, setIssuing] = useState(false);
-  const [adding, setAdding] = useState("");
+  const [guiding, setGuiding] = useState(false);
+  const [demoting, setDemoting] = useState<Key>();
 
   const people = users.data?.users ?? [];
   const live = (keys.data?.keys ?? []).filter((key) => key.revoked_at === null);
+  const holders = [...new Set(live.map((key) => key.user_name))];
+  const blocked = admin && people.length === 0;
 
   useCommand(
     { id: "keys/issue", label: "Issue a key", group: "Keys", icon: KeyRound, perform: () => setIssuing(true) },
-    people.length > 0,
+    !blocked,
   );
-
-  const removePerson = async (person: User) => {
-    const yes = await confirmed({
-      title: `Remove ${person.name}?`,
-      says: "Their keys stop working.",
-      action: "Remove person",
-    });
-    if (!yes) return;
-    drop(`/api/users/${person.id}`)
-      .then(() => {
-        toast(`Removed ${person.name}`, { says: "Their keys no longer open this gateway." });
-        users.reload();
-        keys.reload();
-      })
-      .catch((error: Error) =>
-        toast(`Could not remove ${person.name}`, { says: error.message, tone: "critical" }),
-      );
-  };
+  useCommand({
+    id: "keys/connect",
+    label: "How to connect a client",
+    group: "Keys",
+    icon: Plug,
+    perform: () => setGuiding(true),
+  });
 
   const revoke = async (key: Key) => {
     const yes = await confirmed({
@@ -80,134 +73,112 @@ export function KeysPage() {
   return (
     <Page
       title="Keys"
-      note="what your clients present to this gateway"
+      note={admin ? "what every program presents to this gateway" : "what your programs present to this gateway"}
       refused={users.error ?? keys.error}
       bleed
       aside={
-        <Button tone="primary" disabled={people.length === 0} onClick={() => setIssuing(true)}>
-          <Plus strokeWidth={2} />
-          Issue a key
-        </Button>
+        <>
+          <Button onClick={() => setGuiding(true)}>
+            <Plug strokeWidth={1.75} />
+            How to connect
+          </Button>
+          <Button tone="primary" disabled={blocked} onClick={() => setIssuing(true)}>
+            <Plus strokeWidth={2} />
+            Issue a key
+          </Button>
+        </>
       }
     >
       <IssueKey
         open={issuing}
-        people={people}
+        people={admin ? people : []}
         onClose={() => setIssuing(false)}
         onIssued={keys.reload}
       />
-
-      <Group title="People" count={people.length}>
-        <form
-          className="flex items-center gap-1.5"
-          onSubmit={(event) => {
-            event.preventDefault();
-            const name = adding.trim();
-            tell("/api/users", { name })
-              .then(() => {
-                setAdding("");
-                users.reload();
-                toast(`Added ${name}`, { says: "Issue them a key next.", tone: "good" });
-              })
-              .catch((error: Error) =>
-                toast(`Could not add ${name}`, { says: error.message, tone: "critical" }),
-              );
-          }}
-        >
-          <Input
-            lead={<UserPlus strokeWidth={1.75} />}
-            className="h-7 w-48"
-            value={adding}
-            placeholder="Add a person"
-            aria-label="Name of the person to add"
-            onChange={(event) => setAdding(event.target.value)}
-          />
-          <Button type="submit" disabled={adding.trim() === ""}>
-            Add
-          </Button>
-        </form>
-      </Group>
-
-      {people.length === 0 ? (
-        <Nothing icon={Users} says="Nobody is registered yet. Add a person, then issue them a key." />
-      ) : (
-        <Table contained={false} className={LIST}>
-          <Head>
-            <Row>
-              <th>Name</th>
-              <th className="w-32">Keys</th>
-              <th className="w-40">Since</th>
-              <th className="w-28" />
-            </Row>
-          </Head>
-          <Body>
-            {people.map((person) => (
-              <Row key={person.id} className={`group ${rowHover}`}>
-                <td className="font-medium text-ink">{person.name}</td>
-                <td className="numeric text-ink-secondary">
-                  {live.filter((key) => key.user_id === person.id).length}
-                </td>
-                <td className="text-ink-secondary">{day(person.created_at)}</td>
-                <td className="text-right">
-                  <Button
-                    tone="ghost"
-                    size="small"
-                    className={REVEALED}
-                    onClick={() => void removePerson(person)}
-                  >
-                    <Trash2 strokeWidth={1.75} />
-                    Remove
-                  </Button>
-                </td>
-              </Row>
-            ))}
-          </Body>
-        </Table>
-      )}
-
-      <Group title="Live keys" count={live.length} />
+      <Dialog
+        open={guiding}
+        onClose={() => setGuiding(false)}
+        width="wide"
+        title="Connect a client"
+        description="Put a key from this page where the snippet says gwk_…"
+      >
+        <ConnectGuide />
+      </Dialog>
+      <KeyDemotions open={demoting !== undefined} keyRow={demoting} onClose={() => setDemoting(undefined)} />
 
       {live.length === 0 ? (
         <Nothing
           icon={KeyRound}
-          says="No key is live. Issue one and point a client at this gateway with it."
+          says={
+            blocked
+              ? "Nobody is registered yet. Add a person on the People page, or say who you are above, then issue a key."
+              : "No key is live. Issue one for each program you point at this gateway."
+          }
+          offers={
+            blocked ? undefined : (
+              <Button tone="primary" size="medium" onClick={() => setIssuing(true)}>
+                Issue a key
+              </Button>
+            )
+          }
         />
       ) : (
-        <Table contained={false} className={LIST}>
+        <Table
+          contained={false}
+          className="[&_td:first-child]:pl-5 [&_td:last-child]:pr-3 [&_th:first-child]:pl-5 [&_th:last-child]:pr-3 [&_thead_th]:border-t-0"
+        >
           <Head>
             <Row>
               <th>Label</th>
-              <th className="w-48">Person</th>
               <th className="w-40">Prefix</th>
-              <th className="w-40">Last used</th>
-              <th className="w-28" />
+              <th className="w-36">Last used</th>
+              <th className="w-36">Issued</th>
+              <th className="w-12" />
             </Row>
           </Head>
-          <Body>
-            {live.map((key) => (
-              <Row key={key.id} className={`group ${rowHover}`}>
-                <td className="font-medium text-ink">{key.label}</td>
-                <td className="text-ink-secondary">
-                  {people.find((person) => person.id === key.user_id)?.name ?? UNKNOWN}
-                </td>
-                <td className="mono text-ink-secondary">{key.prefix}…</td>
-                <td className="text-ink-secondary">
-                  {key.last_used_at ? ago(key.last_used_at) : <Badge>never</Badge>}
-                </td>
-                <td className="text-right">
-                  <Button
-                    tone="ghost"
-                    size="small"
-                    className={REVEALED}
-                    onClick={() => void revoke(key)}
-                  >
-                    <Trash2 strokeWidth={1.75} />
-                    Revoke
-                  </Button>
-                </td>
-              </Row>
-            ))}
-          </Body>
+          {holders.map((holder) => (
+            <Body key={holder}>
+              {admin ? (
+                <tr>
+                  <td colSpan={COLUMNS} className="h-[var(--group-height)]! bg-shade text-small select-none">
+                    <span className="font-medium text-ink-title">{holder}</span>
+                    <span className="numeric ml-2 text-ink-secondary">
+                      {live.filter((key) => key.user_name === holder).length}
+                    </span>
+                  </td>
+                </tr>
+              ) : null}
+              {live
+                .filter((key) => key.user_name === holder)
+                .map((key) => (
+                  <Row key={key.id} className={`group ${rowHover}`}>
+                    <td className="font-medium text-ink">{key.label}</td>
+                    <td className="mono text-ink-secondary">{key.prefix}…</td>
+                    <td className="text-ink-secondary">
+                      {key.last_used_at ? ago(key.last_used_at) : <Badge>never</Badge>}
+                    </td>
+                    <td className="text-ink-secondary">{day(key.created_at)}</td>
+                    <td className="text-right">
+                      <Menu
+                        trigger={
+                          <Button tone="ghost" size="icon" aria-label={`Actions for ${key.label}`}>
+                            <MoreHorizontal strokeWidth={1.75} />
+                          </Button>
+                        }
+                      >
+                        <MenuItem icon={ArrowDownToLine} onClick={() => setDemoting(key)}>
+                          Where it goes last
+                        </MenuItem>
+                        <MenuSeparator />
+                        <MenuItem icon={Trash2} danger onClick={() => void revoke(key)}>
+                          Revoke
+                        </MenuItem>
+                      </Menu>
+                    </td>
+                  </Row>
+                ))}
+            </Body>
+          ))}
         </Table>
       )}
     </Page>

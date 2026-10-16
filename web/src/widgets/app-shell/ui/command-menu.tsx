@@ -7,7 +7,7 @@ import { useCommands, type Command } from "@/shared/model/commands";
 import { Keys } from "@/shared/ui";
 import { useTheme } from "@/features/toggle-theme";
 import { signOut } from "@/features/sign-out";
-import { PLACES } from "../model/places";
+import { usePlaces } from "../model/places";
 import { useSheet } from "../model/sheet";
 
 type Entry = {
@@ -28,6 +28,7 @@ export function CommandMenu({ bumps }: { bumps: number }) {
   const theme = useTheme((store) => store.theme);
   const flip = useTheme((store) => store.flip);
   const navigate = useNavigate();
+  const places = usePlaces();
   const popup = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -41,7 +42,7 @@ export function CommandMenu({ bumps }: { bumps: number }) {
   const sections: Section[] = [
     {
       value: "Go to",
-      items: PLACES.map((place) => ({
+      items: places.map((place) => ({
         value: `go ${place.to}`,
         label: `Go to ${place.label}`,
         icon: place.icon,

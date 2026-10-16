@@ -4,18 +4,35 @@ const KINDS = ["request_opened", "request_settled", "account_changed", "limits_o
 
 export type Happening = (typeof KINDS)[number];
 
-export function useHappenings(listen: (happening: Happening) => void) {
+type Listener = (happening: Happening) => void;
+
+const listeners = new Set<Listener>();
+let source: EventSource | undefined;
+
+function subscribe(listener: Listener) {
+  listeners.add(listener);
+  if (!source) {
+    source = new EventSource("/api/events");
+    source.onmessage = (message) => {
+      const happening = read(message.data);
+      if (!happening) return;
+      for (const each of listeners) each(happening);
+    };
+  }
+  return () => {
+    listeners.delete(listener);
+    if (listeners.size === 0 && source) {
+      source.close();
+      source = undefined;
+    }
+  };
+}
+
+export function useHappenings(listen: Listener) {
   const held = useRef(listen);
   held.current = listen;
 
-  useEffect(() => {
-    const source = new EventSource("/api/events");
-    source.onmessage = (message) => {
-      const happening = read(message.data);
-      if (happening) held.current(happening);
-    };
-    return () => source.close();
-  }, []);
+  useEffect(() => subscribe((happening) => held.current(happening)), []);
 }
 
 function read(data: unknown): Happening | undefined {

@@ -1,6 +1,6 @@
 import { Dialog, Keys } from "@/shared/ui";
 import { MOD } from "@/shared/lib/keys";
-import { PLACES } from "../model/places";
+import { usePlaces } from "../model/places";
 import { useSheet } from "../model/sheet";
 
 type Shortcut = { label: string; keys: readonly string[]; then?: boolean };
@@ -11,13 +11,12 @@ const GENERAL: readonly Shortcut[] = [
   { label: "Close whatever is open", keys: ["Esc"] },
 ];
 
-const GOING: readonly Shortcut[] = PLACES.map((place) => ({
-  label: `Go to ${place.label}`,
-  keys: ["G", place.letter],
-  then: true,
-}));
-
 export function ShortcutSheet() {
+  const going: readonly Shortcut[] = usePlaces().map((place) => ({
+    label: `Go to ${place.label}`,
+    keys: ["G", place.letter],
+    then: true,
+  }));
   const open = useSheet((store) => store.open);
   const setOpen = useSheet((store) => store.setOpen);
 
@@ -31,7 +30,7 @@ export function ShortcutSheet() {
     >
       <div className="flex flex-col gap-5">
         <Listing title="General" shortcuts={GENERAL} />
-        <Listing title="Navigation" shortcuts={GOING} />
+        <Listing title="Navigation" shortcuts={going} />
       </div>
     </Dialog>
   );

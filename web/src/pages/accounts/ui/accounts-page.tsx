@@ -19,16 +19,22 @@ import { useHappenings, useResource } from "@/shared/api";
 import { useCommand } from "@/shared/model/commands";
 import { StateBadge, type Account } from "@/entities/account";
 import { worstWindow, type Overview } from "@/entities/provider";
+import { useMe, type User } from "@/entities/user";
 import { AccountActions, AccountMenuItems } from "@/features/set-account-state";
+import { HandOver } from "@/features/hand-over-account";
 import { RegisterAccount } from "@/widgets/register-account";
 import { ago, UNKNOWN } from "@/shared/lib/format";
 
-const COLUMNS = 5;
+const COLUMNS = 6;
 
 export function AccountsPage() {
   const [adding, setAdding] = useState(false);
   const accounts = useResource<{ accounts: Account[] }>("/api/accounts");
   const overview = useResource<Overview>("/api/overview");
+  const me = useMe((store) => store.me);
+  const admin = me?.admin ?? false;
+  const users = useResource<{ users: User[] }>(admin ? "/api/users" : undefined);
+  const people = users.data?.users ?? [];
 
   const reloadAccounts = accounts.reload;
   const reloadOverview = overview.reload;
@@ -66,7 +72,7 @@ export function AccountsPage() {
   return (
     <Page
       title="Accounts"
-      note="requests go to whichever one can serve them"
+      note="each request goes to one the caller may use and that can serve it"
       refused={accounts.error}
       bleed
       aside={
@@ -103,6 +109,7 @@ export function AccountsPage() {
           <Head>
             <Row>
               <th>Account</th>
+              <th className="w-44">Whose</th>
               <th className="w-40">State</th>
               <th className="w-72">Tightest window</th>
               <Count className="w-28">Observed</Count>
@@ -135,9 +142,22 @@ export function AccountsPage() {
                         <span className="flex min-w-0 items-center gap-2.5">
                           <span className="truncate font-medium text-ink">{account.name}</span>
                           <Pill className="h-5 px-2 text-micro text-ink-secondary">
-                            {account.credential_kind === "api_key" ? "API key" : "sign-in"}
+                            {account.credential_kind === "api_key" ? "API key" : "plan"}
                           </Pill>
                         </span>
+                      </td>
+                      <td>
+                        {admin ? (
+                          <HandOver account={account} people={people} onChanged={reloadAccounts} />
+                        ) : (
+                          <span className="truncate text-ink-secondary">
+                            {account.owner === null
+                              ? "Everyone"
+                              : account.owner === me?.person?.id
+                                ? "You"
+                                : (account.owner_name ?? account.owner)}
+                          </span>
+                        )}
                       </td>
                       <td>
                         <StateBadge state={account.state} until={account.cooldown_until} now={now} />

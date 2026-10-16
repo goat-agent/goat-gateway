@@ -1,5 +1,5 @@
 export { Button, ButtonLink, type ButtonProps } from "./button";
-export { Field, Input } from "./field";
+export { Field, Input, TextArea } from "./field";
 export { Select, type Choice } from "./select";
 export { Panel, PanelHead, Group } from "./panel";
 export { Badge, Pill, type Tone } from "./badge";

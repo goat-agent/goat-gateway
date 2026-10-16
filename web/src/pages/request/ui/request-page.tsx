@@ -14,7 +14,7 @@ import {
   Property,
 } from "@/shared/ui";
 import { useResource } from "@/shared/api";
-import { StatusBadge, type Request } from "@/entities/request";
+import { StatusBadge, type Attempt, type Request } from "@/entities/request";
 import { duration, moment, money, tokens, UNKNOWN } from "@/shared/lib/format";
 
 const TRAIL = (
@@ -90,6 +90,20 @@ export function RequestPage() {
             </Panel>
           ) : null}
 
+          {request.attempts && request.attempts.length > 0 ? (
+            <Panel>
+              <PanelHead
+                title="Tried first"
+                note="refused before a byte reached the client, so it went on to the next"
+              />
+              <ul className="m-0 flex list-none flex-col p-0 pb-2">
+                {request.attempts.map((attempt, index) => (
+                  <TriedFirst key={index} attempt={attempt} />
+                ))}
+              </ul>
+            </Panel>
+          ) : null}
+
           <Panel>
             <PanelHead title="What it used" />
             <Facts>
@@ -132,7 +146,14 @@ export function RequestPage() {
             <Property name="Time to first byte" value={duration(request.ttft_ms)} />
             <Property name="Took" value={duration(request.duration_ms)} />
             <Property name="Provider" value={request.provider} />
-            <Property name="Account" value={request.account ?? UNKNOWN} />
+            <Property
+              name="Served on"
+              value={
+                request.credential === "carried"
+                  ? "the client's own login"
+                  : (request.account ?? UNKNOWN)
+              }
+            />
             <Property name="Person" value={request.person ?? UNKNOWN} />
             <Property name="Client" value={request.client ?? UNKNOWN} />
             <Property
@@ -148,6 +169,28 @@ export function RequestPage() {
         </aside>
       </div>
     </Page>
+  );
+}
+
+function TriedFirst({ attempt }: { attempt: Attempt }) {
+  if ("carried" in attempt) {
+    return (
+      <li className="flex min-w-0 flex-col gap-0.5 px-4 py-2 text-small">
+        <span className="font-medium text-ink">The client's own login was set aside</span>
+        <span className="text-ink-secondary">{attempt.why}</span>
+      </li>
+    );
+  }
+  return (
+    <li className="flex min-w-0 flex-col gap-0.5 px-4 py-2 text-small">
+      <span className="flex items-center gap-2">
+        <span className="font-medium text-ink">{attempt.account}</span>
+        <span className="numeric text-ink-secondary">refused with {attempt.status}</span>
+      </span>
+      {attempt.said ? (
+        <span className="mono truncate text-mini text-ink-secondary select-text">{attempt.said}</span>
+      ) : null}
+    </li>
   );
 }
 

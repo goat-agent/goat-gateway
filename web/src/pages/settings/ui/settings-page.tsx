@@ -1,8 +1,9 @@
 import type { ReactNode } from "react";
-import { LogOut } from "lucide-react";
+import { Boxes, LogOut } from "lucide-react";
 import {
   Body,
   Button,
+  ButtonLink,
   Cell,
   Count,
   Head,
@@ -15,9 +16,11 @@ import {
   rowHover,
 } from "@/shared/ui";
 import { useResource } from "@/shared/api";
+import { useMe } from "@/entities/user";
 import { money } from "@/shared/lib/format";
 import { useTheme, type Theme } from "@/features/toggle-theme";
 import { signOut } from "@/features/sign-out";
+import { ChangePassword } from "@/features/change-password";
 
 type Price = {
   provider: string;
@@ -34,45 +37,43 @@ const THEMES: readonly { value: Theme; label: string }[] = [
 ];
 
 export function SettingsPage() {
-  const models = useResource<Record<string, string[]>>("/api/models");
   const pricing = useResource<{ prices: Price[]; as_of: string }>("/api/pricing");
   const theme = useTheme((store) => store.theme);
   const flip = useTheme((store) => store.flip);
-
-  const providers = Object.entries(models.data ?? {});
+  const me = useMe((store) => store.me);
+  const person = me?.person ?? null;
   const prices = pricing.data?.prices ?? [];
 
   return (
-    <Page title="Settings" refused={models.error ?? pricing.error} bleed>
+    <Page title="Settings" refused={pricing.error} bleed>
       <div className="mx-auto flex w-full max-w-[52rem] flex-col gap-10 px-6 py-8">
-        <Section
-          title="Providers"
-          says="Declared in config.toml next to the database, or built in."
-        >
+        <Section title="You">
           <Panel>
-            {providers.length === 0 ? (
-              <Nothing says="No provider is declared, which should not be possible." />
+            {person ? (
+              <>
+                <Setting
+                  name={person.name}
+                  says={
+                    person.role === "admin"
+                      ? "An admin. You see and manage every person, account, and key."
+                      : "A member. You see your own requests, keys, and plans, and the API keys shared with everyone."
+                  }
+                  control={null}
+                />
+                <div className="hairline-t border-line-subtle">
+                  <Setting
+                    name="Password"
+                    says="What you sign in to this console with."
+                    control={<ChangePassword />}
+                  />
+                </div>
+              </>
             ) : (
-              <Table className="[&_thead_th]:border-t-0">
-                <Head>
-                  <Row>
-                    <th className="w-44">Provider</th>
-                    <th>Models it declares</th>
-                  </Row>
-                </Head>
-                <Body className="[&_td]:h-auto [&_td]:py-2.5">
-                  {providers.map(([provider, named]) => (
-                    <Row key={provider} className={rowHover}>
-                      <td className="align-top font-medium text-ink">{provider}</td>
-                      <td className="whitespace-normal text-ink-secondary">
-                        {named.length > 0
-                          ? named.join(", ")
-                          : "none — anything routes through untouched"}
-                      </td>
-                    </Row>
-                  ))}
-                </Body>
-              </Table>
+              <Setting
+                name="The admin key"
+                says="This session answers for everyone. Say who you are in the banner above to sign in as a person from now on."
+                control={null}
+              />
             )}
           </Panel>
         </Section>
@@ -115,6 +116,21 @@ export function SettingsPage() {
           </Panel>
         </Section>
 
+        <Section title="Providers">
+          <Panel>
+            <Setting
+              name="What this gateway reaches"
+              says="Built-in declarations and your own in config.toml, the formats each speaks, and the models each declares."
+              control={
+                <ButtonLink to="/providers">
+                  <Boxes strokeWidth={1.75} />
+                  Open providers
+                </ButtonLink>
+              }
+            />
+          </Panel>
+        </Section>
+
         <Section title="Appearance">
           <Panel>
             <Setting
@@ -138,7 +154,7 @@ export function SettingsPage() {
           <Panel>
             <Setting
               name="Sign out"
-              says="Signing out clears the cookie in this browser. The admin key itself does not change."
+              says="Ends this session in this browser. Your password and keys do not change."
               control={
                 <Button onClick={signOut}>
                   <LogOut strokeWidth={1.75} />

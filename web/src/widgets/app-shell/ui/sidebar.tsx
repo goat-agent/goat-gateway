@@ -4,10 +4,11 @@ import { Button, Mark, Tooltip } from "@/shared/ui";
 import { cn } from "@/shared/lib/cn";
 import { ThemeButton } from "@/features/toggle-theme";
 import { useLive } from "@/entities/request";
-import { PLACES, SECTIONS } from "../model/places";
+import { SECTIONS, usePlaces } from "../model/places";
 import { useSheet } from "../model/sheet";
 
 export function Sidebar() {
+  const places = usePlaces();
   return (
     <nav
       aria-label="Places"
@@ -24,7 +25,7 @@ export function Sidebar() {
             <span className="flex h-7 items-center px-[7px] text-mini font-medium text-ink-secondary">
               {section}
             </span>
-            {PLACES.filter((place) => place.section === section).map((place) => (
+            {places.filter((place) => place.section === section).map((place) => (
               <NavLink
                 key={place.to}
                 to={place.to}

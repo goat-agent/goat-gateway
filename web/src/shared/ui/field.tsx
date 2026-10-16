@@ -22,6 +22,21 @@ export function Input({
   );
 }
 
+export function TextArea({ className, ...props }: ComponentProps<"textarea">) {
+  return (
+    <textarea
+      data-slot="textarea"
+      spellCheck={false}
+      className={cn(
+        shell,
+        "mono h-auto min-h-40 resize-y py-2 text-mini leading-relaxed whitespace-pre",
+        className,
+      )}
+      {...props}
+    />
+  );
+}
+
 export function Field({
   label,
   hint,
