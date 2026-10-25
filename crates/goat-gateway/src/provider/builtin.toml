@@ -197,6 +197,12 @@ first_only = ["agent_name_hint"]
 token_extra = { resource = "https://api.openai.com/v1" }
 loopback = { host = "127.0.0.1", port = 1455, fallback_port = 1457, path = "/auth/callback" }
 
+[[provider.chatgpt_signin.models]]
+name = "gpt-5"
+
+[[provider.chatgpt_signin.models]]
+name = "gpt-5-codex"
+
 [provider.zai]
 label = "Z.ai GLM Coding Plan"
 limits = { endpoint = { url = "https://api.z.ai/api/monitor/usage/quota/limit" } }

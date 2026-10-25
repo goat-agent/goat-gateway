@@ -864,11 +864,11 @@ mod tests {
     #[test]
     fn a_model_two_providers_declare_goes_to_the_one_with_an_account() {
         let catalog = Catalog::builtin();
-        for (registered, expected) in [("chatgpt", "chatgpt"), ("openai", "openai")] {
+        for registered in ["chatgpt", "chatgpt_signin", "openai"] {
             let route = catalog
                 .route(Wire::Responses, "gpt-5", &[registered.to_owned()])
                 .unwrap_or_else(|error| panic!("{registered}: {error}"));
-            assert_eq!(route.provider, expected);
+            assert_eq!(route.provider, registered);
         }
     }
 
