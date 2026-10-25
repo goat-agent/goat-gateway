@@ -65,7 +65,7 @@ impl Harness {
     }
 
     fn as_person(&self, id: &str) -> String {
-        let token = self.store.open_session(Some(id)).unwrap();
+        let token = self.store.open_session(id).unwrap();
         format!("goat_session={token}")
     }
 
@@ -109,7 +109,7 @@ async fn the_cookie_an_admin_key_opens_is_not_the_admin_key() {
     let harness = harness().await;
     let response = reqwest::Client::new()
         .post(harness.url("/api/session"))
-        .json(&json!({ "key": ADMIN }))
+        .json(&json!({ "key": ADMIN, "name": "mino", "password": "a long password" }))
         .send()
         .await
         .unwrap();
@@ -292,12 +292,12 @@ async fn a_member_issues_keys_only_for_themselves() {
 #[tokio::test]
 async fn a_plan_belongs_to_a_person_and_never_to_everyone() {
     let harness = harness().await;
-    let root = format!("goat_session={}", harness.store.open_session(None).unwrap());
+    let mino = harness.as_person(&harness.mino);
     let (status, refused) = harness
         .post(
             "/api/accounts",
-            &root,
-            json!({ "name": "Shared Max", "provider": "anthropic",
+            &mino,
+            json!({ "name": "Shared Max", "provider": "anthropic", "owner": "everyone",
                     "credential_kind": "setup_token", "secret": "sk-ant-oat01-abc" }),
         )
         .await;
@@ -343,19 +343,41 @@ async fn signing_out_ends_the_session_on_the_server() {
 }
 
 #[tokio::test]
-async fn the_admin_key_holder_can_say_who_they_are() {
+async fn the_admin_key_only_recovers_a_person() {
     let harness = harness().await;
-    let token = harness.store.open_session(None).unwrap();
-    let root = format!("goat_session={token}");
+    let open = |body: Value| {
+        reqwest::Client::new()
+            .post(harness.url("/api/session"))
+            .json(&body)
+            .send()
+    };
 
-    let (_, before) = harness.get("/api/me", &root).await;
-    assert_eq!(before["person"], Value::Null);
+    let alone = open(json!({ "key": ADMIN })).await.unwrap();
+    assert_eq!(
+        alone.status(),
+        400,
+        "a session that is nobody is what made every screen ask who you are"
+    );
 
-    let (status, claimed) = harness
-        .post("/api/me/claim", &root, json!({ "name": "lee" }))
-        .await;
-    assert_eq!(status, 200, "{claimed}");
-    let (_, after) = harness.get("/api/me", &root).await;
-    assert_eq!(after["person"]["name"], "lee");
-    assert_eq!(after["person"]["role"], "admin");
+    let recovered = open(json!({ "key": ADMIN, "name": "ana", "password": "a new password" }))
+        .await
+        .unwrap();
+    assert_eq!(recovered.status(), 204);
+    let cookie = recovered.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let (_, me) = harness.get("/api/me", &cookie).await;
+    assert_eq!(me["person"]["id"], harness.ana.as_str());
+    assert_eq!(me["admin"], true);
+    assert!(
+        harness
+            .store
+            .signed_in("ana", "a new password")
+            .unwrap()
+            .is_some()
+    );
 }

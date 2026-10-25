@@ -11,24 +11,22 @@ use super::{bad_request, failed, forbidden, not_found};
 use crate::{
     App,
     oauth::Stored,
-    store::{AccountRow, AccountState, Viewer},
+    store::{AccountRow, AccountState, Person},
 };
 
 const SETUP_TOKEN_PREFIX: &str = "sk-ant-oat";
 const EVERYONE: &str = "everyone";
 
-pub fn visible(viewer: &Viewer, account: &AccountRow) -> bool {
+pub fn visible(viewer: &Person, account: &AccountRow) -> bool {
     viewer.is_admin() || account.owner.is_none() || owns(viewer, account)
 }
 
-fn manageable(viewer: &Viewer, account: &AccountRow) -> bool {
+fn manageable(viewer: &Person, account: &AccountRow) -> bool {
     viewer.is_admin() || owns(viewer, account)
 }
 
-fn owns(viewer: &Viewer, account: &AccountRow) -> bool {
-    viewer
-        .person()
-        .is_some_and(|person| account.owner.as_deref() == Some(person.id.as_str()))
+fn owns(viewer: &Person, account: &AccountRow) -> bool {
+    account.owner.as_deref() == Some(viewer.id.as_str())
 }
 
 fn find(app: &App, name: &str) -> Result<Option<AccountRow>, Box<Response>> {
@@ -38,7 +36,7 @@ fn find(app: &App, name: &str) -> Result<Option<AccountRow>, Box<Response>> {
         .map_err(|error| Box::new(failed(error.to_string())))
 }
 
-fn may_manage(app: &App, viewer: &Viewer, name: &str) -> Result<(), Box<Response>> {
+fn may_manage(app: &App, viewer: &Person, name: &str) -> Result<(), Box<Response>> {
     match find(app, name)? {
         None => Err(Box::new(not_found(format!(
             "no account is called {name:?}"
@@ -50,7 +48,7 @@ fn may_manage(app: &App, viewer: &Viewer, name: &str) -> Result<(), Box<Response
     }
 }
 
-fn may_take_name(app: &App, viewer: &Viewer, name: &str) -> Result<(), Box<Response>> {
+fn may_take_name(app: &App, viewer: &Person, name: &str) -> Result<(), Box<Response>> {
     match find(app, name)? {
         Some(account) if !manageable(viewer, &account) => Err(Box::new(bad_request(format!(
             "an account called {name:?} already exists. Pick another name"
@@ -61,16 +59,16 @@ fn may_take_name(app: &App, viewer: &Viewer, name: &str) -> Result<(), Box<Respo
 
 fn owner_for(
     app: &App,
-    viewer: &Viewer,
+    viewer: &Person,
     asked: Option<&str>,
     personal: bool,
 ) -> Result<Option<String>, Box<Response>> {
-    let chosen = match (viewer, asked) {
-        (Viewer::Person(person), _) if !viewer.is_admin() => Some(person.id.clone()),
-        (_, Some(EVERYONE)) => None,
-        (_, Some(id)) => Some(id.to_owned()),
-        (Viewer::Person(person), None) if personal => Some(person.id.clone()),
-        (_, None) => None,
+    let chosen = match asked {
+        _ if !viewer.is_admin() => Some(viewer.id.clone()),
+        Some(EVERYONE) => None,
+        Some(id) => Some(id.to_owned()),
+        None if personal => Some(viewer.id.clone()),
+        None => None,
     };
     match chosen {
         None if personal => Err(Box::new(bad_request(
@@ -88,7 +86,7 @@ fn owner_for(
     }
 }
 
-pub async fn list(State(app): State<App>, Extension(viewer): Extension<Viewer>) -> Response {
+pub async fn list(State(app): State<App>, Extension(viewer): Extension<Person>) -> Response {
     match app.store().accounts() {
         Ok(accounts) => {
             let shown: Vec<_> = accounts
@@ -118,7 +116,7 @@ fn api_key() -> String {
 
 pub async fn add(
     State(app): State<App>,
-    Extension(viewer): Extension<Viewer>,
+    Extension(viewer): Extension<Person>,
     Json(body): Json<NewAccount>,
 ) -> Response {
     let name = body.name.trim();
@@ -185,7 +183,7 @@ pub async fn add(
 
 pub async fn remove(
     State(app): State<App>,
-    Extension(viewer): Extension<Viewer>,
+    Extension(viewer): Extension<Person>,
     Path(name): Path<String>,
 ) -> Response {
     if let Err(refusal) = may_manage(&app, &viewer, &name) {
@@ -204,7 +202,7 @@ pub struct SetState {
 
 pub async fn set_state(
     State(app): State<App>,
-    Extension(viewer): Extension<Viewer>,
+    Extension(viewer): Extension<Person>,
     Path(name): Path<String>,
     Json(body): Json<SetState>,
 ) -> Response {
@@ -219,7 +217,7 @@ pub async fn set_state(
 
 pub async fn test(
     State(app): State<App>,
-    Extension(viewer): Extension<Viewer>,
+    Extension(viewer): Extension<Person>,
     Path(name): Path<String>,
 ) -> Response {
     if let Err(refusal) = may_manage(&app, &viewer, &name) {
@@ -239,6 +237,7 @@ pub struct NewOwner {
 
 pub async fn set_owner(
     State(app): State<App>,
+    Extension(viewer): Extension<Person>,
     Path(name): Path<String>,
     Json(body): Json<NewOwner>,
 ) -> Response {
@@ -250,7 +249,7 @@ pub async fn set_owner(
     let personal = account.credential_kind == crate::oauth::KIND;
     let owner = match owner_for(
         &app,
-        &Viewer::Root,
+        &viewer,
         Some(body.owner.as_deref().unwrap_or(EVERYONE)),
         personal,
     ) {
@@ -289,7 +288,7 @@ pub struct BeginSignIn {
 
 pub async fn signin_begin(
     State(app): State<App>,
-    Extension(viewer): Extension<Viewer>,
+    Extension(viewer): Extension<Person>,
     Json(body): Json<BeginSignIn>,
 ) -> Response {
     if let Err(refusal) = may_take_name(&app, &viewer, body.name.trim()) {

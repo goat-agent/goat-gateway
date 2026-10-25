@@ -10,7 +10,7 @@ export type User = {
 
 export type Person = { id: string; name: string; role: Role };
 
-export type Me = { person: Person | null; admin: boolean };
+export type Me = { person: Person; admin: boolean };
 
 export type Key = {
   id: string;

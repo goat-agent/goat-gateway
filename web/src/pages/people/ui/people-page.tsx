@@ -90,7 +90,7 @@ export function PeoplePage() {
       );
   };
 
-  const yourself = shown !== undefined && me?.person?.id === shown.id;
+  const yourself = shown !== undefined && me?.person.id === shown.id;
   const theirKeys = live.filter((key) => key.user_id === selected);
   const theirPlans = owned.filter((account) => account.owner === selected);
 
@@ -148,7 +148,7 @@ export function PeoplePage() {
                       <span className="flex min-w-0 items-center gap-2.5">
                         <Avatar name={person.name} />
                         <span className="truncate font-medium text-ink">{person.name}</span>
-                        {me?.person?.id === person.id ? (
+                        {me?.person.id === person.id ? (
                           <span className="text-mini text-ink-muted">you</span>
                         ) : null}
                       </span>

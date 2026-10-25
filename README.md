@@ -26,8 +26,8 @@ cargo run -p goat-gateway
 ```
 
 It prints an admin key once, opens on `127.0.0.1:8787`, and keeps everything in
-`~/.goat-gateway`. Open the address, add an account, issue yourself a key, then point a client
-at it:
+`~/.goat-gateway`. Open the address, give the admin key with the name and password you will
+sign in with, add an account, issue yourself a key, then point a client at it:
 
 ```sh
 ANTHROPIC_BASE_URL=http://127.0.0.1:8787 ANTHROPIC_AUTH_TOKEN=gwk_… claude
@@ -45,7 +45,7 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:8787 ANTHROPIC_CUSTOM_HEADERS="x-gateway-key
 | Variable | |
 |---|---|
 | `GOAT_HOST`, `GOAT_PORT` | where to listen. Off loopback, `GOAT_ADMIN_KEY` is required |
-| `GOAT_ADMIN_KEY` | set it yourself instead of having one generated |
+| `GOAT_ADMIN_KEY` | set it yourself instead of having one generated. It only creates or recovers a person |
 | `GOAT_DATA_DIR` | where the database and `config.toml` live |
 | `GOAT_MASTER_KEY` | 64 hex characters, instead of `master.key` in the data directory |
 

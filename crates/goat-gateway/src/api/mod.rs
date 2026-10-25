@@ -31,7 +31,6 @@ pub fn open_router() -> Router<App> {
 pub fn router() -> Router<App> {
     Router::new()
         .route("/api/me", get(people::me))
-        .route("/api/me/claim", post(people::claim))
         .route("/api/me/password", post(people::set_own_password))
         .route("/api/overview", get(history::overview))
         .route("/api/requests", get(history::requests))

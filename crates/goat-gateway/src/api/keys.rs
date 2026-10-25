@@ -10,17 +10,14 @@ use serde_json::json;
 use super::{bad_request, failed, forbidden, not_found};
 use crate::{
     App,
-    store::{KeyRow, Viewer},
+    store::{KeyRow, Person},
 };
 
-fn yours(viewer: &Viewer, key: &KeyRow) -> bool {
-    viewer.is_admin()
-        || viewer
-            .person()
-            .is_some_and(|person| person.id == key.user_id)
+fn yours(viewer: &Person, key: &KeyRow) -> bool {
+    viewer.is_admin() || viewer.id == key.user_id
 }
 
-fn may_manage(app: &App, viewer: &Viewer, id: &str) -> Result<KeyRow, Box<Response>> {
+fn may_manage(app: &App, viewer: &Person, id: &str) -> Result<KeyRow, Box<Response>> {
     let found = app
         .store()
         .keys()
@@ -34,7 +31,7 @@ fn may_manage(app: &App, viewer: &Viewer, id: &str) -> Result<KeyRow, Box<Respon
     }
 }
 
-pub async fn list(State(app): State<App>, Extension(viewer): Extension<Viewer>) -> Response {
+pub async fn list(State(app): State<App>, Extension(viewer): Extension<Person>) -> Response {
     match app.store().keys() {
         Ok(keys) => {
             let shown: Vec<_> = keys.into_iter().filter(|key| yours(&viewer, key)).collect();
@@ -53,18 +50,16 @@ pub struct NewKey {
 
 pub async fn issue(
     State(app): State<App>,
-    Extension(viewer): Extension<Viewer>,
+    Extension(viewer): Extension<Person>,
     Json(body): Json<NewKey>,
 ) -> Response {
     let label = body.label.trim();
     if label.is_empty() {
         return bad_request("a key needs a label so you can tell your programs apart");
     }
-    let holder = match (&viewer, body.user_id) {
-        (Viewer::Person(person), _) if !viewer.is_admin() => person.id.clone(),
-        (_, Some(id)) => id,
-        (Viewer::Person(person), None) => person.id.clone(),
-        (Viewer::Root, None) => return bad_request("say whose key this is"),
+    let holder = match body.user_id {
+        Some(id) if viewer.is_admin() => id,
+        _ => viewer.id.clone(),
     };
     match app.store().person(&holder) {
         Ok(Some(_)) => {}
@@ -83,7 +78,7 @@ pub async fn issue(
 
 pub async fn revoke(
     State(app): State<App>,
-    Extension(viewer): Extension<Viewer>,
+    Extension(viewer): Extension<Person>,
     Path(id): Path<String>,
 ) -> Response {
     if let Err(refusal) = may_manage(&app, &viewer, &id) {

@@ -175,4 +175,10 @@ DROP TABLE demotions;
 ALTER TABLE requests DROP COLUMN client;
 "#,
     ),
+    (
+        "0008_every_session_is_a_person",
+        r#"
+DELETE FROM sessions WHERE user_id IS NULL;
+"#,
+    ),
 ];

@@ -107,7 +107,6 @@ function Workspace() {
   const me = useMe((store) => store.me);
   const theme = useTheme((store) => store.theme);
   const flip = useTheme((store) => store.flip);
-  const person = me?.person ?? null;
 
   return (
     <Menu
@@ -124,7 +123,7 @@ function Workspace() {
       }
     >
       <MenuLabel>
-        {person ? `${person.name} · ${person.role}` : "Signed in with the admin key"}
+        {me ? `${me.person.name} · ${me.person.role}` : null}
       </MenuLabel>
       <MenuItem icon={Settings} keys={["G", "S"]} onClick={() => navigate("/settings")}>
         Settings

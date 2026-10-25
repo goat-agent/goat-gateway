@@ -562,7 +562,7 @@ async fn testing_a_chatgpt_sign_in_sends_what_the_codex_backend_accepts() {
 
     let reached: Value = reqwest::Client::new()
         .post(format!("http://{gateway}/api/accounts/ChatGPT/test"))
-        .header("cookie", "goat_admin=gwa_test")
+        .header("cookie", console_session(gateway, "gwa_test").await)
         .send()
         .await
         .unwrap()
@@ -589,4 +589,20 @@ fn flow(provider: &str) -> Option<oauth::Flow> {
 fn catalog_at(upstream: SocketAddr) -> goat_gateway::provider::Catalog {
     goat_gateway::provider::Catalog::builtin()
         .with_base_url("anthropic", &format!("http://{upstream}"))
+}
+
+async fn console_session(gateway: SocketAddr, admin_key: &str) -> String {
+    let opened = reqwest::Client::new()
+        .post(format!("http://{gateway}/api/session"))
+        .json(&json!({ "key": admin_key, "name": "jmo", "password": "a long password" }))
+        .send()
+        .await
+        .unwrap();
+    opened.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned()
 }

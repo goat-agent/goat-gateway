@@ -7,17 +7,21 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{bad_request, failed, forbidden, not_found};
+use super::{bad_request, failed, not_found};
 use crate::{
     App, auth,
-    store::{Role, Viewer},
+    store::{Person, Role},
 };
 
 const SHORTEST_PASSWORD: usize = 8;
 
 pub async fn health(State(app): State<App>) -> Response {
-    let configured = app.store().has_admin_key().unwrap_or(false);
-    Json(json!({ "needs_admin_key": configured })).into_response()
+    let nobody_yet = app
+        .store()
+        .users()
+        .map(|users| users.is_empty())
+        .unwrap_or(false);
+    Json(json!({ "nobody_yet": nobody_yet })).into_response()
 }
 
 #[derive(Deserialize)]
@@ -34,22 +38,40 @@ pub async fn open_session(State(app): State<App>, Json(body): Json<Credentials>)
     let store = app.store();
     let opened = match (
         body.key.as_deref(),
-        body.name.as_deref(),
+        body.name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty()),
         body.password.as_deref(),
     ) {
-        (Some(key), _, _) => match store.admin_key_matches(key.trim()) {
-            Ok(true) => store.open_session(None),
-            Ok(false) => {
-                return refused("that admin key is not the one this gateway was started with");
+        (Some(key), Some(name), Some(password)) => {
+            match store.admin_key_matches(key.trim()) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return refused("that admin key is not the one this gateway was started with");
+                }
+                Err(error) => return failed(error.to_string()),
             }
-            Err(error) => return failed(error.to_string()),
-        },
+            if let Some(refusal) = too_short(password) {
+                return refusal;
+            }
+            match store.recover(name, password) {
+                Ok(person) => store.open_session(&person.id),
+                Err(error) => return failed(error.to_string()),
+            }
+        }
+        (Some(_), _, _) => {
+            return bad_request(
+                "the admin key only recovers a person: give a name and a new password with it. \
+                 A name nobody has yet makes a new admin",
+            );
+        }
         (None, Some(name), Some(password)) => match store.signed_in(name, password) {
-            Ok(Some(person)) => store.open_session(Some(&person.id)),
+            Ok(Some(person)) => store.open_session(&person.id),
             Ok(None) => return refused("that name and password do not match anyone here"),
             Err(error) => return failed(error.to_string()),
         },
-        _ => return bad_request("sign in with a name and password, or with the admin key"),
+        _ => return bad_request("sign in with a name and password"),
     };
     match opened {
         Ok(token) => signed_in(&token),
@@ -74,54 +96,12 @@ pub async fn close_session(State(app): State<App>, headers: HeaderMap) -> Respon
         .into_response()
 }
 
-pub async fn me(Extension(viewer): Extension<Viewer>) -> Response {
+pub async fn me(Extension(viewer): Extension<Person>) -> Response {
     Json(json!({
-        "person": viewer.person(),
+        "person": viewer,
         "admin": viewer.is_admin(),
     }))
     .into_response()
-}
-
-#[derive(Deserialize)]
-pub struct Claim {
-    #[serde(default)]
-    user_id: Option<String>,
-    #[serde(default)]
-    name: Option<String>,
-}
-
-pub async fn claim(
-    State(app): State<App>,
-    Extension(viewer): Extension<Viewer>,
-    headers: HeaderMap,
-    Json(body): Json<Claim>,
-) -> Response {
-    if viewer != Viewer::Root {
-        return forbidden("this session already belongs to someone");
-    }
-    let Some(token) = auth::session_token(&headers) else {
-        return bad_request(
-            "claiming needs a console session. Sign in with the admin key in the console first",
-        );
-    };
-    let store = app.store();
-    let id = match (body.user_id, body.name.as_deref().map(str::trim)) {
-        (Some(id), _) => id,
-        (None, Some(name)) if !name.is_empty() => match store.add_user(name) {
-            Ok(user) => user.id,
-            Err(_) => return bad_request(format!("there is already a person called {name:?}")),
-        },
-        _ => return bad_request("say who you are: pick a person, or give a name"),
-    };
-    let claimed = store
-        .set_role(&id, Role::Admin)
-        .and_then(|()| store.claim_session(&token, &id))
-        .and_then(|()| store.person(&id));
-    match claimed {
-        Ok(Some(person)) => Json(json!({ "person": person })).into_response(),
-        Ok(None) => not_found(format!("nobody here has the id {id}")),
-        Err(error) => failed(error.to_string()),
-    }
 }
 
 #[derive(Deserialize)]
@@ -131,16 +111,13 @@ pub struct NewPassword {
 
 pub async fn set_own_password(
     State(app): State<App>,
-    Extension(viewer): Extension<Viewer>,
+    Extension(viewer): Extension<Person>,
     Json(body): Json<NewPassword>,
 ) -> Response {
-    let Some(person) = viewer.person() else {
-        return bad_request("the admin key has no password. Say who you are first");
-    };
     if let Some(refusal) = too_short(&body.password) {
         return refusal;
     }
-    match app.store().set_password(&person.id, &body.password) {
+    match app.store().set_password(&viewer.id, &body.password) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => failed(error.to_string()),
     }
@@ -238,7 +215,7 @@ pub async fn accept_invite(
     }
     let store = app.store();
     match store.accept_invite(&token, &body.password) {
-        Ok(Some(person)) => match store.open_session(Some(&person.id)) {
+        Ok(Some(person)) => match store.open_session(&person.id) {
             Ok(session) => signed_in(&session),
             Err(error) => failed(error.to_string()),
         },

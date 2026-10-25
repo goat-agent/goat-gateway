@@ -15,34 +15,26 @@ export function SettingsPage() {
   const theme = useTheme((store) => store.theme);
   const flip = useTheme((store) => store.flip);
   const me = useMe((store) => store.me);
-  const person = me?.person ?? null;
 
   return (
     <Page title="Settings">
       <div className="mx-auto flex w-full max-w-[44rem] flex-col gap-10 px-6 pt-10 pb-16">
         <Group title="You">
-          {person ? (
-            <>
-              <Setting
-                name={person.name}
-                says={
-                  person.role === "admin"
-                    ? "An admin. You see and manage every person, account, and key."
-                    : "A member. You see your own requests, keys, and plans, and the API keys shared with everyone."
-                }
-              />
-              <Setting
-                name="Password"
-                says="What you sign in to this console with."
-                control={<ChangePassword />}
-              />
-            </>
-          ) : (
+          {me ? (
             <Setting
-              name="The admin key"
-              says="This session answers for everyone. Say who you are in the banner above to sign in as a person from now on."
+              name={me.person.name}
+              says={
+                me.admin
+                  ? "An admin. You see and manage every person, account, and key."
+                  : "A member. You see your own requests, keys, and plans, and the API keys shared with everyone."
+              }
             />
-          )}
+          ) : null}
+          <Setting
+            name="Password"
+            says="What you sign in to this console with. Forgotten, it is reset with the admin key on the sign-in screen."
+            control={<ChangePassword />}
+          />
         </Group>
 
         <Group title="Appearance">

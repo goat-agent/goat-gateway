@@ -75,7 +75,8 @@ async fn harness() -> Harness {
     std::fs::write(&config, "# written by hand, keep me\n").unwrap();
 
     let store = Store::in_memory(&[7u8; 32]).unwrap();
-    let cookie = format!("goat_session={}", store.open_session(None).unwrap());
+    let admin = store.recover("admin", "a long password").unwrap();
+    let cookie = format!("goat_session={}", store.open_session(&admin.id).unwrap());
     let app = App::new(store.clone(), [1u8; 32], Catalog::builtin()).reading(config.clone());
     let gateway = serve(app.router()).await;
     Harness {

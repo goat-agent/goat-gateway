@@ -9,11 +9,10 @@ use serde_json::json;
 
 use crate::{
     App,
-    store::{Caller, Viewer},
+    store::{Caller, Person},
 };
 
 pub const COOKIE: &str = "goat_session";
-const ADMIN_KEY_COOKIE: &str = "goat_admin";
 
 pub async fn gateway(State(app): State<App>, mut request: Request, next: Next) -> Response {
     let presented = request
@@ -44,9 +43,11 @@ pub async fn gateway(State(app): State<App>, mut request: Request, next: Next) -
 }
 
 pub async fn console(State(app): State<App>, mut request: Request, next: Next) -> Response {
-    match viewer_of(&app, request.headers()) {
-        Some(viewer) => {
-            request.extensions_mut().insert(viewer);
+    let holder = session_token(request.headers())
+        .and_then(|token| app.store().session_holder(&token).ok().flatten());
+    match holder {
+        Some(person) => {
+            request.extensions_mut().insert(person);
             next.run(request).await
         }
         None => (
@@ -60,30 +61,17 @@ pub async fn console(State(app): State<App>, mut request: Request, next: Next) -
 pub async fn admins_only(request: Request, next: Next) -> Response {
     let admin = request
         .extensions()
-        .get::<Viewer>()
-        .is_some_and(Viewer::is_admin);
+        .get::<Person>()
+        .is_some_and(Person::is_admin);
     if admin {
         next.run(request).await
     } else {
         (
             StatusCode::FORBIDDEN,
-            Json(json!({ "error": "only an admin can do this. Ask one, or sign in with the admin key" })),
+            Json(json!({ "error": "only an admin can do this. Ask one" })),
         )
             .into_response()
     }
-}
-
-fn viewer_of(app: &App, headers: &HeaderMap) -> Option<Viewer> {
-    if let Some(token) = cookie(headers, COOKIE)
-        && let Ok(Some(viewer)) = app.store().viewer_for(&token)
-    {
-        return Some(viewer);
-    }
-    [cookie(headers, ADMIN_KEY_COOKIE), bearer(headers)]
-        .into_iter()
-        .flatten()
-        .any(|presented| app.store().admin_key_matches(&presented).unwrap_or(false))
-        .then_some(Viewer::Root)
 }
 
 pub fn session_token(headers: &HeaderMap) -> Option<String> {

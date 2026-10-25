@@ -75,7 +75,7 @@ export function AccountInspector({
               me?.admin ? (
                 <HandOver account={account} people={people} onChanged={onChanged} />
               ) : (
-                whoseOf(account, me?.person?.id)
+                whoseOf(account, me?.person.id)
               )
             }
           />

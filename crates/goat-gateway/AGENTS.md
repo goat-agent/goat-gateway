@@ -47,8 +47,9 @@ credentials — then either passes it through or walks a translation path.
   the hosts declared there, never stored, and refused with a 401 if nobody declared it.
 - A key is a label. It says who is calling and, by convention, which program. It never changes
   which account serves a request.
-- The console signs people in with sessions (`gws_`, hashed in `sessions`). The admin key opens
-  a session that answers for everyone until it is claimed by a person.
+- The console signs people in with sessions (`gws_`, hashed in `sessions`). Every session is a
+  person. The admin key only recovers one: given with a name and a new password, it sets that
+  password, makes that person an admin, and signs them in. A name nobody has makes a new admin.
 
 ## Choosing an account
 

@@ -32,6 +32,7 @@ struct Harness {
     store: Store,
     api_key: String,
     key_id: String,
+    session: String,
 }
 
 async fn harness() -> Harness {
@@ -44,6 +45,8 @@ async fn harness() -> Harness {
     store.set_admin_key(ADMIN).unwrap();
     let user = store.add_user("isac").unwrap();
     let issued = store.issue_key(&user.id, "맥북 Codex").unwrap();
+    let admin = store.recover("admin", "a long password").unwrap();
+    let session = store.open_session(&admin.id).unwrap();
 
     let app = App::new(store.clone(), [3u8; 32], catalog_at(upstream_addr));
     let addr = serve(app.router()).await;
@@ -53,6 +56,7 @@ async fn harness() -> Harness {
         store,
         api_key: issued.secret,
         key_id: issued.id,
+        session,
     }
 }
 
@@ -69,7 +73,7 @@ async fn call_gateway(harness: &Harness, key: Option<&str>) -> u16 {
 async fn call_admin(harness: &Harness, cookie: Option<&str>) -> u16 {
     let mut request = reqwest::Client::new().get(format!("http://{}/api/accounts", harness.addr));
     if let Some(cookie) = cookie {
-        request = request.header("cookie", format!("goat_admin={cookie}"));
+        request = request.header("cookie", format!("goat_session={cookie}"));
     }
     request.send().await.unwrap().status().as_u16()
 }
@@ -97,7 +101,12 @@ async fn each_credential_works_on_its_own_surface() {
     let harness = harness().await;
     let key = harness.api_key.clone();
     assert_eq!(call_gateway(&harness, Some(&key)).await, 200);
-    assert_eq!(call_admin(&harness, Some(ADMIN)).await, 200);
+    assert_eq!(call_admin(&harness, Some(&harness.session)).await, 200);
+    assert_eq!(
+        call_admin(&harness, Some(ADMIN)).await,
+        401,
+        "the admin key recovers a person; it is not a console session itself"
+    );
 }
 
 #[tokio::test]
@@ -162,7 +171,7 @@ async fn a_session_can_be_opened_with_the_admin_key_and_not_with_anything_else()
 
     let good = client
         .post(format!("http://{}/api/session", harness.addr))
-        .json(&json!({ "key": ADMIN }))
+        .json(&json!({ "key": ADMIN, "name": "isac", "password": "a long password" }))
         .send()
         .await
         .unwrap();
@@ -176,7 +185,7 @@ async fn a_session_can_be_opened_with_the_admin_key_and_not_with_anything_else()
 
     let bad = client
         .post(format!("http://{}/api/session", harness.addr))
-        .json(&json!({ "key": harness.api_key }))
+        .json(&json!({ "key": harness.api_key, "name": "isac", "password": "a long password" }))
         .send()
         .await
         .unwrap();
@@ -188,7 +197,7 @@ async fn the_key_never_appears_in_a_listing() {
     let harness = harness().await;
     let listing = reqwest::Client::new()
         .get(format!("http://{}/api/keys", harness.addr))
-        .header("cookie", format!("goat_admin={ADMIN}"))
+        .header("cookie", format!("goat_session={}", harness.session))
         .send()
         .await
         .unwrap()

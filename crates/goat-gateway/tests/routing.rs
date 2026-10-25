@@ -373,7 +373,10 @@ async fn testing_an_account_sends_a_real_request_and_says_what_came_back() {
 
     let response = reqwest::Client::new()
         .post(format!("http://{}/api/accounts/work/test", harness.gateway))
-        .header("cookie", "goat_admin=gwa_test-admin")
+        .header(
+            "cookie",
+            console_session(harness.gateway, "gwa_test-admin").await,
+        )
         .send()
         .await
         .unwrap();
@@ -1047,4 +1050,20 @@ async fn a_chatgpt_plan_and_an_openai_key_serve_gpt_5_as_one_pool() {
         Some("Bearer sk-key"),
         "once the plan is spent, the key serves the same model"
     );
+}
+
+async fn console_session(gateway: SocketAddr, admin_key: &str) -> String {
+    let opened = reqwest::Client::new()
+        .post(format!("http://{gateway}/api/session"))
+        .json(&json!({ "key": admin_key, "name": "jmo", "password": "a long password" }))
+        .send()
+        .await
+        .unwrap();
+    opened.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned()
 }

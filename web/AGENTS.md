@@ -39,7 +39,7 @@ cargo runs for a release, so the arrangement cannot quietly rot.
 
 zustand, never `localStorage` directly. The `persist` middleware handles storage.
 
-- `shared/model/session` — whether the gateway wants its admin key.
+- `shared/model/session` — whether someone has to sign in.
 - `shared/model/series` — which colour slot an entity holds, per chart.
 - `shared/model/commands` — whether the command menu is open, and the commands pages have
   registered with `useCommand` while they are mounted.

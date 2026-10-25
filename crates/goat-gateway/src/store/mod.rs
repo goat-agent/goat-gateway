@@ -13,9 +13,7 @@ use chacha20poly1305::{
 use rand::RngCore as _;
 use rusqlite::{Connection, OptionalExtension as _, params};
 
-pub use crate::store::auth::{
-    ADMIN_PREFIX, Caller, Issued, KeyRow, Person, Role, UserRow, Viewer, mint,
-};
+pub use crate::store::auth::{ADMIN_PREFIX, Caller, Issued, KeyRow, Person, Role, UserRow, mint};
 pub use crate::store::records::{AccountRow, AccountState, RequestRow, Usage};
 
 pub mod insight;
@@ -31,6 +29,8 @@ pub enum StoreError {
     Undecryptable { account: String },
     #[error("no account named {0:?}")]
     UnknownAccount(String),
+    #[error("nobody here has the id {0}")]
+    UnknownPerson(String),
     #[error("could not protect the password: {0}")]
     Password(String),
 }

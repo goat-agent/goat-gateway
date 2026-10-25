@@ -149,7 +149,7 @@ export function AccountsPage() {
                             </span>
                           </td>
                           <td className="truncate text-ink-secondary">
-                            {whoseOf(account, me?.person?.id)}
+                            {whoseOf(account, me?.person.id)}
                           </td>
                           <td>
                             <QuotaGlance quota={quota} account={account.name} now={now} resets />

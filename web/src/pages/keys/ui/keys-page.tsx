@@ -44,14 +44,12 @@ export function KeysPage() {
   const live = (keys.data?.keys ?? []).filter((key) => key.revoked_at === null);
   const holders = [...new Set(live.map((key) => key.user_name))];
   const ordered = holders.flatMap((holder) => live.filter((key) => key.user_name === holder));
-  const blocked = admin && people.length === 0;
 
   useRowKeys({ ids: ordered.map((key) => key.id), selected, select, close });
   const shown = live.find((key) => key.id === selected);
 
   useCommand(
     { id: "keys/issue", label: "Issue a key", group: "Keys", icon: KeyRound, perform: () => setIssuing(true) },
-    !blocked,
   );
   useCommand({
     id: "keys/connect",
@@ -91,7 +89,7 @@ export function KeysPage() {
             <Plug strokeWidth={1.75} />
             How to connect
           </Button>
-          <Button tone="primary" disabled={blocked} onClick={() => setIssuing(true)}>
+          <Button tone="primary" onClick={() => setIssuing(true)}>
             <Plus strokeWidth={2} />
             Issue a key
           </Button>
@@ -121,17 +119,11 @@ export function KeysPage() {
             keys.data ? (
               <Nothing
                 icon={KeyRound}
-                says={
-                  blocked
-                    ? "Nobody is registered yet. Add a person on the People page, or say who you are above, then issue a key."
-                    : "No key is live. Issue one for each program you point at this gateway."
-                }
+                says="No key is live. Issue one for each program you point at this gateway."
                 offers={
-                  blocked ? undefined : (
-                    <Button tone="primary" size="medium" onClick={() => setIssuing(true)}>
-                      Issue a key
-                    </Button>
-                  )
+                  <Button tone="primary" size="medium" onClick={() => setIssuing(true)}>
+                    Issue a key
+                  </Button>
                 }
               />
             ) : null
