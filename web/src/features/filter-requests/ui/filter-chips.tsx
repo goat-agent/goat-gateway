@@ -1,4 +1,5 @@
 import { X } from "lucide-react";
+import { useKeyNames } from "@/entities/user";
 
 export function FilterChips({
   held,
@@ -8,6 +9,7 @@ export function FilterChips({
   onDrop: (field: string) => void;
 }) {
   const chips = Object.entries(held);
+  const keyName = useKeyNames();
   if (chips.length === 0) return null;
 
   return (
@@ -20,7 +22,7 @@ export function FilterChips({
           <span className="flex items-center px-2 text-ink-secondary capitalize">{field}</span>
           <span className="flex items-center hairline-l border-line px-2 text-ink-muted">is</span>
           <span className="flex max-w-56 items-center hairline-l border-line px-2 text-ink">
-            <span className="truncate">{value || "unattributed"}</span>
+            <span className="truncate">{(field === "key" ? keyName(value) : value) || "unattributed"}</span>
           </span>
           <button
             type="button"

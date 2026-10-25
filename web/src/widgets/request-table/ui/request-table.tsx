@@ -1,60 +1,76 @@
-import { Link, useNavigate } from "react-router-dom";
-import { Body, Cell, Count, Head, Pill, Row, Table, rowHover } from "@/shared/ui";
-import { StatusBadge, type Request } from "@/entities/request";
-import { duration, moment, money, tokens, UNKNOWN } from "@/shared/lib/format";
+import { Body, Cell, Count, Head, Row, Table, rowHover } from "@/shared/ui";
+import { StatusGlyph, formatOf, type Request } from "@/entities/request";
+import { useKeyNames } from "@/entities/user";
+import { duration, moment, money, stamp, tokens, UNKNOWN } from "@/shared/lib/format";
 
-export function RequestTable({ requests, now }: { requests: Request[]; now: number }) {
-  const navigate = useNavigate();
+const NARROW = "hidden @3xl:table-cell";
+const MIDDLE = "hidden @4xl:table-cell";
+const WIDE = "hidden @5xl:table-cell";
 
+export function RequestTable({
+  requests,
+  now,
+  selected,
+  onSelect,
+}: {
+  requests: Request[];
+  now: number;
+  selected: string | undefined;
+  onSelect: (id: string) => void;
+}) {
+  const keyName = useKeyNames();
   return (
-    <Table contained={false} className="[&_td:first-child]:pl-5 [&_td:last-child]:pr-5 [&_th:first-child]:pl-5 [&_th:last-child]:pr-5 [&_thead_th]:sticky [&_thead_th]:top-0 [&_thead_th]:z-[1] [&_thead_th]:border-t-0 [&_thead_th]:bg-panel">
+    <Table sticky className="table-fixed">
       <Head>
         <Row>
-          <th className="w-32">Status</th>
-          <th className="w-36">Started</th>
+          <th className="w-[46px]" aria-label="Status" />
+          <th className="w-28">Started</th>
           <th>Model</th>
-          <th>Account</th>
-          <th>Client</th>
-          <th>Format</th>
-          <Count>In</Count>
-          <Count>Out</Count>
-          <Count>Cost</Count>
-          <Count>Took</Count>
+          <th className="w-40">Account</th>
+          <th className={`w-32 ${MIDDLE}`}>Key</th>
+          <th className={`w-40 ${WIDE}`}>Format</th>
+          <Count className={`w-18 ${NARROW}`}>In</Count>
+          <Count className={`w-18 ${NARROW}`}>Out</Count>
+          <Count className={`w-20 ${MIDDLE}`}>Cost</Count>
+          <Count className="w-20">Took</Count>
         </Row>
       </Head>
       <Body>
         {requests.map((request) => (
           <Row
             key={request.id}
+            data-row={request.id}
+            selected={request.id === selected}
             className={rowHover}
-            onClick={() => navigate(`/requests/${request.id}`)}
+            onClick={() => onSelect(request.id)}
           >
             <td>
-              <StatusBadge status={request.status} kind={request.error_kind} />
+              <StatusGlyph status={request.status} kind={request.error_kind} />
             </td>
-            <td>
-              <Link
-                to={`/requests/${request.id}`}
-                className="mono text-ink-secondary hover:text-ink"
-                onClick={(event) => event.stopPropagation()}
-              >
-                {moment(request.started_at, now)}
-              </Link>
+            <td className="mono truncate text-ink-secondary" title={moment(request.started_at, now)}>
+              {stamp(request.started_at, now)}
             </td>
-            <td className="max-w-72 truncate font-medium text-ink">{request.model}</td>
-            <td className="max-w-48 truncate text-ink-secondary">{request.account ?? UNKNOWN}</td>
-            <td className="max-w-40 truncate text-ink-secondary">{request.client ?? UNKNOWN}</td>
-            <td>
-              <Pill
-                className="h-5 px-2 text-micro text-ink-secondary"
-                title={request.translated ? "the format was translated on the way through" : undefined}
-              >
-                {request.translated ? `${request.ingress} → ${request.egress}` : request.ingress}
-              </Pill>
+            <td className="truncate">
+              <span className="font-medium text-ink">{request.model}</span>
+              {request.status === "error" ? (
+                <span className="ml-2 text-mini text-critical-text">
+                  {request.error_kind ?? "failed"}
+                </span>
+              ) : null}
             </td>
-            <Cell>{tokens(request.usage.input_tokens)}</Cell>
-            <Cell>{tokens(request.usage.output_tokens)}</Cell>
-            <Cell>{money(request.cost_micros)}</Cell>
+            <td className="truncate text-ink-secondary">
+              {request.credential === "carried" ? "own login" : (request.account ?? UNKNOWN)}
+            </td>
+            <td className={`truncate text-ink-secondary ${MIDDLE}`}>{keyName(request.key_id) || UNKNOWN}</td>
+            <td
+              className={`truncate text-mini text-ink-secondary ${WIDE}`}
+              title={request.translated ? "the format was translated on the way through" : undefined}
+            >
+              {formatOf(request)}
+            </td>
+            <Cell className={NARROW}>{tokens(request.usage.input_tokens)}</Cell>
+            <Cell className={NARROW}>{tokens(request.usage.output_tokens)}</Cell>
+            <Cell className={MIDDLE}>{money(request.cost_micros)}</Cell>
             <Cell className="text-ink-secondary">{duration(request.duration_ms)}</Cell>
           </Row>
         ))}

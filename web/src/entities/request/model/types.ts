@@ -4,7 +4,6 @@ export type Request = {
   id: string;
   started_at: number;
   person: string | null;
-  client: string | null;
   conversation: string | null;
   provider: string;
   account: string | null;
@@ -31,7 +30,7 @@ export type Request = {
 };
 
 export type Attempt =
-  | { account: string; status: number; said: string | null }
+  | { account: string | null; credential: string; status: number; said: string | null }
   | { carried: string; why: string };
 
 export const STATUSES = ["ok", "error", "in_flight", "abandoned"] as const;

@@ -1,13 +1,16 @@
 import { useCallback, useState } from "react";
 import { FilterX, Rows3, Search } from "lucide-react";
-import { Button, Input, Nothing, Page, Select } from "@/shared/ui";
+import { Button, Input, Nothing, Page, Select, Split } from "@/shared/ui";
 import { query, useHappenings, useResource } from "@/shared/api";
 import { useCommand } from "@/shared/model/commands";
+import { useRowKeys } from "@/shared/lib/use-row-keys";
+import { useSelection } from "@/shared/lib/use-selection";
 import { STATUSES, type Request } from "@/entities/request";
 import { RequestTable } from "@/widgets/request-table";
 import { FilterChips, useFilter } from "@/features/filter-requests";
+import { RequestInspector } from "./request-inspector";
 
-const FIELDS = ["search", "status", "provider", "account", "model", "person", "client"] as const;
+const FIELDS = ["search", "status", "provider", "account", "model", "person", "key"] as const;
 
 const STATUS_CHOICES = [
   { value: "", label: "Any status" },
@@ -17,6 +20,7 @@ const STATUS_CHOICES = [
 export function RequestsPage() {
   const { held, set, clear } = useFilter(FIELDS);
   const [typed, setTyped] = useState(held["search"] ?? "");
+  const { selected, select, close } = useSelection("/requests");
 
   const page = useResource<{ requests: Request[]; next_before: number | null }>(
     `/api/requests${query({ ...held, limit: 100 })}`,
@@ -33,6 +37,8 @@ export function RequestsPage() {
   );
 
   const requests = page.data?.requests ?? [];
+  useRowKeys({ ids: requests.map((request) => request.id), selected, select, close });
+
   const narrowed = Object.keys(held).length > 0;
   const elsewhere = Object.fromEntries(
     Object.entries(held).filter(([field]) => field !== "search" && field !== "status"),
@@ -51,9 +57,9 @@ export function RequestsPage() {
   return (
     <Page
       title="Requests"
-      note={requests.length > 0 ? `newest first, ${requests.length} shown` : undefined}
+      count={page.data ? requests.length : undefined}
       refused={page.error}
-      bleed
+      scroll={false}
       toolbar={
         <>
           <form
@@ -87,25 +93,33 @@ export function RequestsPage() {
         </>
       }
     >
-      {requests.length === 0 ? (
-        <Nothing
-          icon={Rows3}
-          says={
-            narrowed
-              ? "Nothing matches these filters."
-              : "No request has reached this gateway yet. Point a client at it and the first one lands here."
-          }
-          offers={
-            narrowed ? (
-              <Button size="medium" onClick={clearAll}>
-                Clear filters
-              </Button>
-            ) : undefined
-          }
-        />
-      ) : (
-        <RequestTable requests={requests} now={Date.now()} />
-      )}
+      <Split
+        label="Request"
+        list={
+          requests.length === 0 ? (
+            page.data ? (
+              <Nothing
+                icon={Rows3}
+                says={
+                  narrowed
+                    ? "Nothing matches these filters."
+                    : "No request has reached this gateway yet. Point a client at it and the first one lands here."
+                }
+                offers={
+                  narrowed ? (
+                    <Button size="medium" onClick={clearAll}>
+                      Clear filters
+                    </Button>
+                  ) : undefined
+                }
+              />
+            ) : null
+          ) : (
+            <RequestTable requests={requests} now={Date.now()} selected={selected} onSelect={select} />
+          )
+        }
+        inspector={selected ? <RequestInspector id={selected} onClose={close} /> : undefined}
+      />
     </Page>
   );
 }

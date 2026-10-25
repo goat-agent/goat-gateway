@@ -45,25 +45,9 @@ pub struct Person {
     pub role: Role,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Viewer {
-    Root,
-    Person(Person),
-}
-
-impl Viewer {
+impl Person {
     pub fn is_admin(&self) -> bool {
-        match self {
-            Self::Root => true,
-            Self::Person(person) => person.role == Role::Admin,
-        }
-    }
-
-    pub fn person(&self) -> Option<&Person> {
-        match self {
-            Self::Root => None,
-            Self::Person(person) => Some(person),
-        }
+        self.role == Role::Admin
     }
 }
 
@@ -186,6 +170,23 @@ impl Store {
         Ok(())
     }
 
+    pub fn recover(&self, name: &str, password: &str) -> Result<Person, StoreError> {
+        let name = name.trim();
+        let existing = self
+            .users()?
+            .into_iter()
+            .find(|user| user.name == name)
+            .map(|user| user.id);
+        let id = match existing {
+            Some(id) => id,
+            None => self.add_user(name)?.id,
+        };
+        self.set_password(&id, password)?;
+        self.set_role(&id, Role::Admin)?;
+        self.person(&id)?
+            .ok_or_else(|| StoreError::UnknownPerson(id.clone()))
+    }
+
     pub fn signed_in(&self, name: &str, password: &str) -> Result<Option<Person>, StoreError> {
         let connection = self.connection.lock().expect("store mutex");
         let found: Option<(Person, Option<String>)> = connection
@@ -204,7 +205,7 @@ impl Store {
         }))
     }
 
-    pub fn open_session(&self, user_id: Option<&str>) -> Result<String, StoreError> {
+    pub fn open_session(&self, user_id: &str) -> Result<String, StoreError> {
         let token = mint(SESSION_PREFIX);
         let connection = self.connection.lock().expect("store mutex");
         connection.execute(
@@ -214,14 +215,15 @@ impl Store {
         Ok(token)
     }
 
-    pub fn viewer_for(&self, token: &str) -> Result<Option<Viewer>, StoreError> {
+    pub fn session_holder(&self, token: &str) -> Result<Option<Person>, StoreError> {
         if !token.starts_with(SESSION_PREFIX) {
             return Ok(None);
         }
         let connection = self.connection.lock().expect("store mutex");
-        let found: Option<Option<String>> = connection
+        let found: Option<String> = connection
             .query_row(
-                "SELECT user_id FROM sessions WHERE hash = ?1 AND expires_at > ?2",
+                "SELECT user_id FROM sessions
+                 WHERE hash = ?1 AND expires_at > ?2 AND user_id IS NOT NULL",
                 params![digest(token), now()],
                 |row| row.get(0),
             )
@@ -230,18 +232,8 @@ impl Store {
 
         match found {
             None => Ok(None),
-            Some(None) => Ok(Some(Viewer::Root)),
-            Some(Some(user_id)) => Ok(self.person(&user_id)?.map(Viewer::Person)),
+            Some(user_id) => self.person(&user_id),
         }
-    }
-
-    pub fn claim_session(&self, token: &str, user_id: &str) -> Result<(), StoreError> {
-        let connection = self.connection.lock().expect("store mutex");
-        connection.execute(
-            "UPDATE sessions SET user_id = ?2 WHERE hash = ?1",
-            params![digest(token), user_id],
-        )?;
-        Ok(())
     }
 
     pub fn close_session(&self, token: &str) -> Result<(), StoreError> {
@@ -640,29 +632,46 @@ mod tests {
     fn a_session_resolves_until_it_is_closed() {
         let store = store();
         let mino = store.add_user("mino").unwrap();
-        let token = store.open_session(Some(&mino.id)).unwrap();
+        let token = store.open_session(&mino.id).unwrap();
 
-        let Some(Viewer::Person(person)) = store.viewer_for(&token).unwrap() else {
-            panic!("a person's session must resolve to that person");
-        };
-        assert_eq!(person.name, "mino");
+        let person = store.session_holder(&token).unwrap();
+        assert_eq!(person.map(|person| person.name).as_deref(), Some("mino"));
 
         store.close_session(&token).unwrap();
-        assert!(store.viewer_for(&token).unwrap().is_none());
+        assert!(store.session_holder(&token).unwrap().is_none());
     }
 
     #[test]
-    fn the_admin_key_opens_a_session_that_answers_for_everyone() {
+    fn recovering_with_the_admin_key_makes_an_admin_who_can_sign_in() {
         let store = store();
-        let token = store.open_session(None).unwrap();
-        assert_eq!(store.viewer_for(&token).unwrap(), Some(Viewer::Root));
-        assert!(Viewer::Root.is_admin());
+        let first = store.recover("mino", "a long password").unwrap();
+        assert!(
+            first.is_admin(),
+            "the first person in is the one running it"
+        );
+        assert!(
+            store
+                .signed_in("mino", "a long password")
+                .unwrap()
+                .is_some()
+        );
+
+        let again = store.recover("mino", "another password").unwrap();
+        assert_eq!(again.id, first.id, "recovering an existing name resets it");
+        assert!(
+            store
+                .signed_in("mino", "a long password")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(store.users().unwrap().len(), 1);
     }
 
     #[test]
     fn a_session_token_is_not_stored_in_the_clear() {
         let store = store();
-        let token = store.open_session(None).unwrap();
+        let mino = store.add_user("mino").unwrap();
+        let token = store.open_session(&mino.id).unwrap();
         let connection = store.connection.lock().unwrap();
         let stored: Vec<u8> = connection
             .query_row("SELECT hash FROM sessions", [], |row| row.get(0))

@@ -30,26 +30,3 @@ export function Badge({ className, tone, dot = false, children, ...props }: Badg
     </span>
   );
 }
-
-export function Pill({
-  className,
-  swatch,
-  children,
-  ...props
-}: ComponentProps<"span"> & { swatch?: string }) {
-  return (
-    <span
-      data-slot="pill"
-      className={cn(
-        "inline-flex h-6 shrink-0 items-center gap-1.5 rounded-full hairline border-line px-2.5 text-mini font-medium whitespace-nowrap text-ink select-none",
-        className,
-      )}
-      {...props}
-    >
-      {swatch ? (
-        <span className="size-2 shrink-0 rounded-full" style={{ background: swatch }} />
-      ) : null}
-      {children}
-    </span>
-  );
-}

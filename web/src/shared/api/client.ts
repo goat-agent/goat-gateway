@@ -50,7 +50,7 @@ export async function drop(path: string): Promise<void> {
 async function checked(response: Response) {
   if (response.status === 401) {
     useSession.getState().lock();
-    throw new Refused(401, "this gateway wants its admin key");
+    throw new Refused(401, "sign in to use the console");
   }
   if (!response.ok) {
     throw new Refused(response.status, await complaint(response));

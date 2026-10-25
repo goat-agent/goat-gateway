@@ -12,16 +12,16 @@ use super::{failed, not_found};
 use crate::{
     App, pricing,
     store::{
-        AccountState, Viewer,
+        AccountState, Person,
         insight::{By, Filter},
     },
 };
 
 type Asked = HashMap<String, String>;
 
-fn scoped(viewer: &Viewer, mut filter: Filter) -> Filter {
+fn scoped(viewer: &Person, mut filter: Filter) -> Filter {
     if !viewer.is_admin() {
-        filter.user_id = viewer.person().map(|person| person.id.clone());
+        filter.user_id = Some(viewer.id.clone());
     }
     filter
 }
@@ -33,7 +33,7 @@ pub struct Window {
 
 pub async fn overview(
     State(app): State<App>,
-    Extension(viewer): Extension<Viewer>,
+    Extension(viewer): Extension<Person>,
     Query(window): Query<Window>,
 ) -> Response {
     let store = app.store();
@@ -115,7 +115,7 @@ pub async fn overview(
 
 pub async fn requests(
     State(app): State<App>,
-    Extension(viewer): Extension<Viewer>,
+    Extension(viewer): Extension<Person>,
     Query(asked): Query<Asked>,
 ) -> Response {
     let filter = scoped(&viewer, Filter::from_query(&asked));
@@ -139,15 +139,11 @@ pub async fn requests(
 
 pub async fn one_request(
     State(app): State<App>,
-    Extension(viewer): Extension<Viewer>,
+    Extension(viewer): Extension<Person>,
     Path(id): Path<String>,
 ) -> Response {
-    let mine = |owner: &Option<String>| {
-        viewer.is_admin()
-            || viewer
-                .person()
-                .is_some_and(|person| owner.as_deref() == Some(person.id.as_str()))
-    };
+    let mine =
+        |owner: &Option<String>| viewer.is_admin() || owner.as_deref() == Some(viewer.id.as_str());
     match app.store().request(&id) {
         Ok(Some(row)) if mine(&row.user_id) => Json(json!({ "request": row })).into_response(),
         Ok(_) => not_found(format!("no request {id}")),
@@ -157,7 +153,7 @@ pub async fn one_request(
 
 pub async fn usage(
     State(app): State<App>,
-    Extension(viewer): Extension<Viewer>,
+    Extension(viewer): Extension<Person>,
     Query(asked): Query<Asked>,
 ) -> Response {
     let store = app.store();

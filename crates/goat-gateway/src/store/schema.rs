@@ -163,4 +163,22 @@ UPDATE accounts SET owner = (SELECT id FROM users)
  WHERE credential_kind = 'oauth' AND (SELECT COUNT(*) FROM users) = 1;
 "#,
     ),
+    (
+        "0006_keys_are_labels",
+        r#"
+DROP TABLE demotions;
+"#,
+    ),
+    (
+        "0007_a_request_names_its_key",
+        r#"
+ALTER TABLE requests DROP COLUMN client;
+"#,
+    ),
+    (
+        "0008_every_session_is_a_person",
+        r#"
+DELETE FROM sessions WHERE user_id IS NULL;
+"#,
+    ),
 ];

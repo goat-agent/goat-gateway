@@ -15,6 +15,7 @@ use goat_gateway::{
 use serde_json::json;
 
 const SSE: &str = "event: message_start\ndata: {\"type\":\"message_start\"}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+const SPENT: &str = r#"{"type":"error","error":{"type":"rate_limit_error","message":"You have reached your limit."}}"#;
 const THIRD_PARTY: &str = r#"{"type":"error","error":{"type":"invalid_request_error","message":"Third-party apps now draw from your extra usage, not your plan limits."}}"#;
 
 async fn serve(router: Router) -> SocketAddr {
@@ -52,16 +53,25 @@ impl Seen {
 }
 
 async fn anthropic(State(seen): State<Seen>, headers: HeaderMap) -> Response {
-    let plan = headers
+    let bearer = headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value == "Bearer at_ana_plan");
+        .unwrap_or_default()
+        .to_owned();
     seen.calls.lock().unwrap().push(headers);
-    if plan {
+    if bearer == "Bearer at_ana_plan" {
         return Response::builder()
             .status(400)
             .header("content-type", "application/json")
             .body(Body::from(THIRD_PARTY))
+            .unwrap();
+    }
+    if bearer.ends_with("spent") {
+        return Response::builder()
+            .status(429)
+            .header("retry-after", "600")
+            .header("content-type", "application/json")
+            .body(Body::from(SPENT))
             .unwrap();
     }
     Response::builder()
@@ -89,7 +99,7 @@ struct Harness {
     store: Store,
     seen: Seen,
     ana_key: String,
-    ana_key_id: String,
+    ana_id: String,
 }
 
 async fn harness(carried_host: &str, accounts: bool) -> Harness {
@@ -137,7 +147,7 @@ async fn harness(carried_host: &str, accounts: bool) -> Harness {
         store,
         seen,
         ana_key: issued.secret,
-        ana_key_id: issued.id,
+        ana_id: ana.id,
     }
 }
 
@@ -250,10 +260,6 @@ async fn a_refused_request_moves_to_the_next_account_and_parks_nothing() {
         "a refusal of one program's request says nothing about the account"
     );
 
-    let demotions = harness.store.demotions(&harness.ana_key_id).unwrap();
-    assert_eq!(demotions.len(), 1);
-    assert_eq!(demotions[0].account, "Ana Max");
-
     let row = &harness.store.recent_requests(1).unwrap()[0];
     assert_eq!(row.account.as_deref(), Some("Team key"));
     assert_eq!(row.status, "ok");
@@ -270,14 +276,79 @@ async fn a_refused_request_moves_to_the_next_account_and_parks_nothing() {
 }
 
 #[tokio::test]
-async fn after_a_refusal_the_key_tries_that_account_last() {
+async fn a_refusal_is_not_held_against_the_key_that_was_refused() {
     let harness = harness("127.0.0.1", true).await;
     harness.send(&[], false).await;
     harness.seen.calls.lock().unwrap().clear();
 
     let status = harness.send(&[], false).await;
     assert_eq!(status, 200);
-    assert_eq!(harness.seen.credentials(), ["sk-ant-team"]);
+    assert_eq!(
+        harness.seen.credentials(),
+        ["Bearer at_ana_plan", "sk-ant-team"],
+        "a key is a label; it never changes which account is tried first"
+    );
+}
+
+#[tokio::test]
+async fn a_spent_account_hands_the_request_to_the_next_one() {
+    let harness = harness("127.0.0.1", true).await;
+    harness.store.remove_account("Ana Max").unwrap();
+    let spent = Stored {
+        access: "at_ana_spent".into(),
+        refresh: None,
+        expires_at: None,
+        account_id: None,
+        client_id: None,
+    };
+    harness
+        .store
+        .add_account("Ana Pro", "anthropic", "oauth", &spent.to_bytes())
+        .unwrap();
+    harness
+        .store
+        .set_owner("Ana Pro", Some(&harness.ana_id))
+        .unwrap();
+
+    let status = harness.send(&[], false).await;
+    assert_eq!(status, 200, "the shared key should have answered");
+    assert_eq!(
+        harness.seen.credentials(),
+        ["Bearer at_ana_spent", "sk-ant-team"]
+    );
+    let accounts = harness.store.accounts().unwrap();
+    let pro = accounts
+        .iter()
+        .find(|account| account.name == "Ana Pro")
+        .unwrap();
+    assert_eq!(pro.state, AccountState::RateLimited);
+}
+
+#[tokio::test]
+async fn a_spent_login_the_client_carried_hands_the_request_to_an_account() {
+    let harness = harness("127.0.0.1", true).await;
+    harness.store.remove_account("Ana Max").unwrap();
+
+    let status = harness
+        .send(&[("authorization", "Bearer sk-ant-oat01-spent")], true)
+        .await;
+    assert_eq!(status, 200, "the shared key should have answered");
+    assert_eq!(
+        harness.seen.credentials(),
+        ["Bearer sk-ant-oat01-spent", "sk-ant-team"],
+        "the client's own login is the first account tried, not the only one"
+    );
+    let row = &harness.store.recent_requests(1).unwrap()[0];
+    assert_eq!(row.account.as_deref(), Some("Team key"));
+    assert!(
+        harness
+            .store
+            .accounts()
+            .unwrap()
+            .iter()
+            .all(|account| account.name != "sk-ant-oat01-spent"),
+        "a carried login is used, never kept"
+    );
 }
 
 #[tokio::test]

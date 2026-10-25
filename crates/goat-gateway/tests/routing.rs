@@ -373,7 +373,10 @@ async fn testing_an_account_sends_a_real_request_and_says_what_came_back() {
 
     let response = reqwest::Client::new()
         .post(format!("http://{}/api/accounts/work/test", harness.gateway))
-        .header("cookie", "goat_admin=gwa_test-admin")
+        .header(
+            "cookie",
+            console_session(harness.gateway, "gwa_test-admin").await,
+        )
         .send()
         .await
         .unwrap();
@@ -968,4 +971,99 @@ async fn a_translated_stream_that_was_cut_short_is_recorded_as_a_failure() {
         row.status, "error",
         "a stream the client saw fail must not be counted as a success"
     );
+}
+
+async fn plan_or_key(State(seen): State<Seen>, headers: HeaderMap, body: Bytes) -> Response {
+    let spent = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == "Bearer at_spent_plan");
+    let answer = record(&seen, "/v1/responses", headers, body).await;
+    if !spent {
+        return answer;
+    }
+    Response::builder()
+        .status(429)
+        .header("retry-after", "600")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"error":{"message":"usage limit reached"}}"#))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_chatgpt_plan_and_an_openai_key_serve_gpt_5_as_one_pool() {
+    let seen = Seen::default();
+    let upstream = serve(
+        Router::new()
+            .route("/v1/responses", post(plan_or_key))
+            .with_state(seen.clone()),
+    )
+    .await;
+
+    let store = Store::in_memory(&[7u8; 32]).unwrap();
+    let user = store.add_user("jmo").unwrap();
+    let key = store.issue_key(&user.id, "Codex").unwrap().secret;
+    let plan = goat_gateway::oauth::Stored {
+        access: "at_plan".into(),
+        refresh: None,
+        expires_at: None,
+        account_id: None,
+        client_id: None,
+    };
+    store
+        .add_account("Plan", "chatgpt_signin", "oauth", &plan.to_bytes())
+        .unwrap();
+    store.set_owner("Plan", Some(&user.id)).unwrap();
+    store
+        .add_account("Key", "openai", "api_key", b"sk-key")
+        .unwrap();
+
+    let catalog = Catalog::builtin()
+        .with_base_url("chatgpt_signin", &format!("http://{upstream}"))
+        .with_base_url("openai", &format!("http://{upstream}"));
+    let gateway = serve(App::new(store.clone(), [1u8; 32], catalog).router()).await;
+    let harness = Harness { gateway, seen, key };
+    let turn = json!({ "model": "gpt-5", "stream": true, "input": "hi" });
+
+    let (status, said) = harness.post("/v1/responses", turn.clone()).await;
+    assert_eq!(status, 200, "{said}");
+    assert_eq!(
+        harness.credential().as_deref(),
+        Some("Bearer at_plan"),
+        "the plan you signed in to comes before the shared key"
+    );
+
+    let spent = goat_gateway::oauth::Stored {
+        access: "at_spent_plan".into(),
+        ..plan
+    };
+    store.remove_account("Plan").unwrap();
+    store
+        .add_account("Plan", "chatgpt_signin", "oauth", &spent.to_bytes())
+        .unwrap();
+    store.set_owner("Plan", Some(&user.id)).unwrap();
+
+    let (status, said) = harness.post("/v1/responses", turn).await;
+    assert_eq!(status, 200, "{said}");
+    assert_eq!(
+        harness.credential().as_deref(),
+        Some("Bearer sk-key"),
+        "once the plan is spent, the key serves the same model"
+    );
+}
+
+async fn console_session(gateway: SocketAddr, admin_key: &str) -> String {
+    let opened = reqwest::Client::new()
+        .post(format!("http://{gateway}/api/session"))
+        .json(&json!({ "key": admin_key, "name": "jmo", "password": "a long password" }))
+        .send()
+        .await
+        .unwrap();
+    opened.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned()
 }

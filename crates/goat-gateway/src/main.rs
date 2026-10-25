@@ -21,7 +21,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args().nth(1).as_deref() == Some("rotate") {
         let key = mint(ADMIN_PREFIX);
         store.set_admin_key(&key)?;
-        println!("New admin key. Open sessions are now signed out.\n\n    {key}\n");
+        println!(
+            "New admin key. The old one no longer recovers anyone; nobody is signed out.\n\n    {key}\n"
+        );
         return Ok(());
     }
 
@@ -49,7 +51,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let key = mint(ADMIN_PREFIX);
         store.set_admin_key(&key)?;
-        println!("\nAdmin key — this is the only time it is shown:\n\n    {key}\n");
+        println!(
+            "\nAdmin key, shown only this once. Give it on the sign-in screen with the name and \
+             password you will use, and you are the first admin:\n\n    {key}\n"
+        );
     }
 
     if let Some(secret) = std::env::var("ANTHROPIC_API_KEY")

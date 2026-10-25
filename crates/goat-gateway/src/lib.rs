@@ -352,7 +352,7 @@ pub(crate) fn request_id() -> String {
 
 pub(crate) fn observe(app: &App, account: &str, status: u16, headers: &axum::http::HeaderMap) {
     let snapshot = observe_limits(app, account, headers);
-    judge(app, account, status, headers, &snapshot);
+    let _ = judge(app, account, status, headers, &snapshot);
 }
 
 pub(crate) fn observe_limits(
@@ -377,7 +377,7 @@ pub(crate) fn judge(
     status: u16,
     headers: &axum::http::HeaderMap,
     snapshot: &limits::Snapshot,
-) {
+) -> bool {
     let moved_to = match limits::classify(status, headers, snapshot) {
         limits::Verdict::Exhausted { until } => {
             Some((store::AccountState::RateLimited, Some(until)))
@@ -386,12 +386,14 @@ pub(crate) fn judge(
         limits::Verdict::Transient | limits::Verdict::Fine => None,
     };
 
-    if let Some((state, until)) = moved_to {
-        let _ = app.inner.store.set_state(account, state, until);
-        app.announcer().say(events::Happening::AccountChanged {
-            account: account.to_owned(),
-            state,
-            until,
-        });
-    }
+    let Some((state, until)) = moved_to else {
+        return false;
+    };
+    let _ = app.inner.store.set_state(account, state, until);
+    app.announcer().say(events::Happening::AccountChanged {
+        account: account.to_owned(),
+        state,
+        until,
+    });
+    true
 }

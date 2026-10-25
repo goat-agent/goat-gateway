@@ -1,17 +1,20 @@
 import { useState } from "react";
-import { ArrowDownToLine, KeyRound, MoreHorizontal, Plug, Plus, Trash2 } from "lucide-react";
+import { KeyRound, Plug, Plus, Trash2 } from "lucide-react";
 import {
   Badge,
   Body,
   Button,
+  Detail,
   Dialog,
+  GroupRow,
   Head,
-  Menu,
-  MenuItem,
-  MenuSeparator,
+  Inspector,
   Nothing,
   Page,
+  Properties,
+  Property,
   Row,
+  Split,
   Table,
   confirmed,
   rowHover,
@@ -19,10 +22,11 @@ import {
 } from "@/shared/ui";
 import { drop, useResource } from "@/shared/api";
 import { useCommand } from "@/shared/model/commands";
+import { useRowKeys } from "@/shared/lib/use-row-keys";
+import { useSelection } from "@/shared/lib/use-selection";
 import { useMe, type Key, type User } from "@/entities/user";
 import { ago, day } from "@/shared/lib/format";
 import { ConnectGuide, IssueKey } from "@/features/issue-key";
-import { KeyDemotions } from "@/features/key-demotions";
 
 const COLUMNS = 5;
 
@@ -31,19 +35,21 @@ export function KeysPage() {
   const admin = me?.admin ?? false;
   const users = useResource<{ users: User[] }>(admin ? "/api/users" : undefined);
   const keys = useResource<{ keys: Key[] }>("/api/keys");
+  const { selected, select, close } = useSelection("/keys");
 
   const [issuing, setIssuing] = useState(false);
   const [guiding, setGuiding] = useState(false);
-  const [demoting, setDemoting] = useState<Key>();
 
   const people = users.data?.users ?? [];
   const live = (keys.data?.keys ?? []).filter((key) => key.revoked_at === null);
   const holders = [...new Set(live.map((key) => key.user_name))];
-  const blocked = admin && people.length === 0;
+  const ordered = holders.flatMap((holder) => live.filter((key) => key.user_name === holder));
+
+  useRowKeys({ ids: ordered.map((key) => key.id), selected, select, close });
+  const shown = live.find((key) => key.id === selected);
 
   useCommand(
     { id: "keys/issue", label: "Issue a key", group: "Keys", icon: KeyRound, perform: () => setIssuing(true) },
-    !blocked,
   );
   useCommand({
     id: "keys/connect",
@@ -63,6 +69,7 @@ export function KeysPage() {
     drop(`/api/keys/${key.id}`)
       .then(() => {
         toast(`Revoked ${key.label}`, { says: "It no longer opens this gateway." });
+        close();
         keys.reload();
       })
       .catch((error: Error) =>
@@ -73,16 +80,16 @@ export function KeysPage() {
   return (
     <Page
       title="Keys"
-      note={admin ? "what every program presents to this gateway" : "what your programs present to this gateway"}
+      count={keys.data ? live.length : undefined}
       refused={users.error ?? keys.error}
-      bleed
-      aside={
+      scroll={false}
+      actions={
         <>
           <Button onClick={() => setGuiding(true)}>
             <Plug strokeWidth={1.75} />
             How to connect
           </Button>
-          <Button tone="primary" disabled={blocked} onClick={() => setIssuing(true)}>
+          <Button tone="primary" onClick={() => setIssuing(true)}>
             <Plus strokeWidth={2} />
             Issue a key
           </Button>
@@ -91,7 +98,7 @@ export function KeysPage() {
     >
       <IssueKey
         open={issuing}
-        people={admin ? people : []}
+        people={admin && people.length > 1 ? people : []}
         onClose={() => setIssuing(false)}
         onIssued={keys.reload}
       />
@@ -104,83 +111,99 @@ export function KeysPage() {
       >
         <ConnectGuide />
       </Dialog>
-      <KeyDemotions open={demoting !== undefined} keyRow={demoting} onClose={() => setDemoting(undefined)} />
 
-      {live.length === 0 ? (
-        <Nothing
-          icon={KeyRound}
-          says={
-            blocked
-              ? "Nobody is registered yet. Add a person on the People page, or say who you are above, then issue a key."
-              : "No key is live. Issue one for each program you point at this gateway."
-          }
-          offers={
-            blocked ? undefined : (
-              <Button tone="primary" size="medium" onClick={() => setIssuing(true)}>
-                Issue a key
-              </Button>
-            )
-          }
-        />
-      ) : (
-        <Table
-          contained={false}
-          className="[&_td:first-child]:pl-5 [&_td:last-child]:pr-3 [&_th:first-child]:pl-5 [&_th:last-child]:pr-3 [&_thead_th]:border-t-0"
-        >
-          <Head>
-            <Row>
-              <th>Label</th>
-              <th className="w-40">Prefix</th>
-              <th className="w-36">Last used</th>
-              <th className="w-36">Issued</th>
-              <th className="w-12" />
-            </Row>
-          </Head>
-          {holders.map((holder) => (
-            <Body key={holder}>
-              {admin ? (
-                <tr>
-                  <td colSpan={COLUMNS} className="h-[var(--group-height)]! bg-shade text-small select-none">
-                    <span className="font-medium text-ink-title">{holder}</span>
-                    <span className="numeric ml-2 text-ink-secondary">
-                      {live.filter((key) => key.user_name === holder).length}
-                    </span>
-                  </td>
-                </tr>
-              ) : null}
-              {live
-                .filter((key) => key.user_name === holder)
-                .map((key) => (
-                  <Row key={key.id} className={`group ${rowHover}`}>
-                    <td className="font-medium text-ink">{key.label}</td>
-                    <td className="mono text-ink-secondary">{key.prefix}…</td>
-                    <td className="text-ink-secondary">
-                      {key.last_used_at ? ago(key.last_used_at) : <Badge>never</Badge>}
-                    </td>
-                    <td className="text-ink-secondary">{day(key.created_at)}</td>
-                    <td className="text-right">
-                      <Menu
-                        trigger={
-                          <Button tone="ghost" size="icon" aria-label={`Actions for ${key.label}`}>
-                            <MoreHorizontal strokeWidth={1.75} />
-                          </Button>
-                        }
+      <Split
+        label="Key"
+        list={
+          live.length === 0 ? (
+            keys.data ? (
+              <Nothing
+                icon={KeyRound}
+                says="No key is live. Issue one for each program you point at this gateway."
+                offers={
+                  <Button tone="primary" size="medium" onClick={() => setIssuing(true)}>
+                    Issue a key
+                  </Button>
+                }
+              />
+            ) : null
+          ) : (
+            <Table sticky className="table-fixed">
+              <Head>
+                <Row>
+                  <th className="w-[46px]" aria-label="Key" />
+                  <th>Label</th>
+                  <th className="w-40">Prefix</th>
+                  <th className="w-32">Last used</th>
+                  <th className="w-28">Issued</th>
+                </Row>
+              </Head>
+              {holders.map((holder) => {
+                const theirs = live.filter((key) => key.user_name === holder);
+                return (
+                  <Body key={holder}>
+                    {admin ? <GroupRow span={COLUMNS} title={holder} count={theirs.length} /> : null}
+                    {theirs.map((key) => (
+                      <Row
+                        key={key.id}
+                        data-row={key.id}
+                        selected={key.id === selected}
+                        className={rowHover}
+                        onClick={() => select(key.id)}
                       >
-                        <MenuItem icon={ArrowDownToLine} onClick={() => setDemoting(key)}>
-                          Where it goes last
-                        </MenuItem>
-                        <MenuSeparator />
-                        <MenuItem icon={Trash2} danger onClick={() => void revoke(key)}>
-                          Revoke
-                        </MenuItem>
-                      </Menu>
-                    </td>
-                  </Row>
-                ))}
-            </Body>
-          ))}
-        </Table>
-      )}
+                        <td>
+                          <KeyRound className="size-3.5 text-ink-muted" strokeWidth={1.75} />
+                        </td>
+                        <td className="truncate font-medium text-ink">{key.label}</td>
+                        <td className="mono truncate text-ink-secondary">
+                          {key.prefix}…
+                        </td>
+                        <td className="truncate text-ink-secondary">
+                          {key.last_used_at ? ago(key.last_used_at) : <Badge>never</Badge>}
+                        </td>
+                        <td className="text-ink-secondary">{day(key.created_at)}</td>
+                      </Row>
+                    ))}
+                  </Body>
+                );
+              })}
+            </Table>
+          )
+        }
+        inspector={
+          selected ? (
+            shown ? (
+              <Inspector
+                kicker={`Key of ${shown.user_name}`}
+                title={shown.label}
+                subtitle={<span className="mono">{shown.prefix}…</span>}
+                actions={
+                  <Button onClick={() => void revoke(shown)}>
+                    <Trash2 strokeWidth={1.75} />
+                    Revoke
+                  </Button>
+                }
+                onClose={close}
+              >
+                <Detail>
+                  <Properties>
+                    <Property name="Belongs to" value={shown.user_name} />
+                    <Property name="Issued" value={day(shown.created_at)} />
+                    <Property
+                      name="Last used"
+                      value={shown.last_used_at ? ago(shown.last_used_at) : "never"}
+                    />
+                  </Properties>
+                </Detail>
+              </Inspector>
+            ) : (
+              <Inspector kicker="Key" title="Not found" onClose={close}>
+                {keys.data ? <Nothing says="No live key has this id. It may have been revoked." /> : null}
+              </Inspector>
+            )
+          ) : undefined
+        }
+      />
     </Page>
   );
 }

@@ -1,11 +1,10 @@
 import { useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { defaultKeybindingsHandlerIgnore, tinykeys, type KeybindingsMap } from "tinykeys";
+import { tinykeys, type KeybindingsMap } from "tinykeys";
 import { useCommands } from "@/shared/model/commands";
+import { typingOrOverlaid } from "@/shared/lib/keys";
 import { usePlaces } from "./places";
 import { useSheet } from "./sheet";
-
-const OVERLAYS = '[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"]';
 
 export function useShortcuts({ onRepeat }: { onRepeat: () => void }) {
   const navigate = useNavigate();
@@ -52,10 +51,4 @@ export function useShortcuts({ onRepeat }: { onRepeat: () => void }) {
       loud();
     };
   }, [navigate, onRepeat, places]);
-}
-
-function typingOrOverlaid(event: KeyboardEvent) {
-  if (defaultKeybindingsHandlerIgnore(event)) return true;
-  const { target } = event;
-  return target instanceof Element && target.closest(OVERLAYS) !== null;
 }

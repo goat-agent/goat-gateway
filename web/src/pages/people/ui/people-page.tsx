@@ -1,17 +1,21 @@
 import { useState } from "react";
-import { Link2, MoreHorizontal, Shield, ShieldOff, Trash2, UserPlus, Users } from "lucide-react";
+import { Link } from "react-router-dom";
+import { Link2, Shield, ShieldOff, Trash2, UserPlus, Users } from "lucide-react";
 import {
+  Avatar,
   Badge,
   Body,
   Button,
+  Detail,
   Dialog,
   Head,
-  Menu,
-  MenuItem,
-  MenuSeparator,
+  Inspector,
   Nothing,
   Page,
+  Properties,
+  Property,
   Row,
+  Split,
   Table,
   confirmed,
   rowHover,
@@ -19,19 +23,21 @@ import {
 } from "@/shared/ui";
 import { drop, send, tell, useResource } from "@/shared/api";
 import { useCommand } from "@/shared/model/commands";
+import { useRowKeys } from "@/shared/lib/use-row-keys";
+import { useSelection } from "@/shared/lib/use-selection";
+import { ago, day } from "@/shared/lib/format";
+import { StateDot, stateWords, type Account } from "@/entities/account";
 import { useMe, type Key, type User } from "@/entities/user";
-import { day } from "@/shared/lib/format";
 import { InviteLink, InvitePerson, inviteLink } from "@/features/invite-person";
-
-const LIST =
-  "[&_td:first-child]:pl-5 [&_td:last-child]:pr-3 [&_th:first-child]:pl-5 [&_th:last-child]:pr-3 [&_thead_th]:border-t-0";
 
 export function PeoplePage() {
   const users = useResource<{ users: User[] }>("/api/users");
   const keys = useResource<{ keys: Key[] }>("/api/keys");
+  const accounts = useResource<{ accounts: Account[] }>("/api/accounts");
   const me = useMe((store) => store.me);
   const [adding, setAdding] = useState(false);
   const [reissued, setReissued] = useState<{ name: string; link: string }>();
+  const { selected, select, close } = useSelection("/people");
 
   useCommand({
     id: "people/add",
@@ -43,6 +49,9 @@ export function PeoplePage() {
 
   const people = users.data?.users ?? [];
   const live = (keys.data?.keys ?? []).filter((key) => key.revoked_at === null);
+  const owned = accounts.data?.accounts ?? [];
+  useRowKeys({ ids: people.map((person) => person.id), selected, select, close });
+  const shown = people.find((person) => person.id === selected);
 
   const reinvite = (person: User) =>
     send<{ invite: string }>(`/api/users/${person.id}/invite`, {})
@@ -71,21 +80,27 @@ export function PeoplePage() {
     drop(`/api/users/${person.id}`)
       .then(() => {
         toast(`Removed ${person.name}`);
+        close();
         users.reload();
         keys.reload();
+        accounts.reload();
       })
       .catch((error: Error) =>
         toast(`Could not remove ${person.name}`, { says: error.message, tone: "critical" }),
       );
   };
 
+  const yourself = shown !== undefined && me?.person.id === shown.id;
+  const theirKeys = live.filter((key) => key.user_id === selected);
+  const theirPlans = owned.filter((account) => account.owner === selected);
+
   return (
     <Page
       title="People"
-      note="who can sign in, and whose plans are whose"
+      count={users.data ? people.length : undefined}
       refused={users.error}
-      bleed
-      aside={
+      scroll={false}
+      actions={
         <Button tone="primary" onClick={() => setAdding(true)}>
           <UserPlus strokeWidth={1.75} />
           Add a person
@@ -102,89 +117,162 @@ export function PeoplePage() {
         {reissued ? <InviteLink link={reissued.link} /> : null}
       </Dialog>
 
-      {people.length === 0 ? (
-        <Nothing
-          icon={Users}
-          says="Nobody is registered yet. Add a person and send them their link."
-        />
-      ) : (
-        <Table contained={false} className={LIST}>
-          <Head>
-            <Row>
-              <th>Name</th>
-              <th className="w-32">Role</th>
-              <th className="w-44">Sign-in</th>
-              <th className="w-24">Keys</th>
-              <th className="w-36">Since</th>
-              <th className="w-12" />
-            </Row>
-          </Head>
-          <Body>
-            {people.map((person) => {
-              const yourself = me?.person?.id === person.id;
-              return (
-                <Row key={person.id} className={`group ${rowHover}`}>
-                  <td className="font-medium text-ink">
-                    {person.name}
-                    {yourself ? <span className="ml-2 text-ink-secondary">you</span> : null}
-                  </td>
-                  <td>
-                    <Badge tone={person.role === "admin" ? "info" : "neutral"}>
-                      {person.role === "admin" ? "Admin" : "Member"}
-                    </Badge>
-                  </td>
-                  <td>
-                    {person.can_sign_in ? (
-                      <span className="text-ink-secondary">password set</span>
-                    ) : (
-                      <Badge tone="warning">invited, not yet in</Badge>
-                    )}
-                  </td>
-                  <td className="numeric text-ink-secondary">
-                    {live.filter((key) => key.user_id === person.id).length}
-                  </td>
-                  <td className="text-ink-secondary">{day(person.created_at)}</td>
-                  <td className="text-right">
-                    <Menu
-                      trigger={
-                        <Button tone="ghost" size="icon" aria-label={`Actions for ${person.name}`}>
-                          <MoreHorizontal strokeWidth={1.75} />
-                        </Button>
-                      }
-                    >
-                      <MenuItem icon={Link2} onClick={() => void reinvite(person)}>
-                        {person.can_sign_in ? "Link to reset their password" : "A new invite link"}
-                      </MenuItem>
-                      {person.role === "admin" ? (
-                        <MenuItem
-                          icon={ShieldOff}
-                          disabled={yourself}
-                          onClick={() => void promote(person, "member")}
-                        >
-                          Make a member
-                        </MenuItem>
-                      ) : (
-                        <MenuItem icon={Shield} onClick={() => void promote(person, "admin")}>
-                          Make an admin
-                        </MenuItem>
-                      )}
-                      <MenuSeparator />
-                      <MenuItem
-                        icon={Trash2}
-                        danger
-                        disabled={yourself}
-                        onClick={() => void remove(person)}
-                      >
-                        Remove
-                      </MenuItem>
-                    </Menu>
-                  </td>
+      <Split
+        label="Person"
+        list={
+          people.length === 0 ? (
+            users.data ? (
+              <Nothing icon={Users} says="Nobody is registered yet. Add a person and send them their link." />
+            ) : null
+          ) : (
+            <Table sticky className="table-fixed">
+              <Head>
+                <Row>
+                  <th>Name</th>
+                  <th className="w-28">Role</th>
+                  <th className="hidden w-44 @3xl:table-cell">Sign-in</th>
+                  <th className="w-20">Keys</th>
+                  <th className="hidden w-28 @4xl:table-cell">Since</th>
                 </Row>
-              );
-            })}
-          </Body>
-        </Table>
-      )}
+              </Head>
+              <Body>
+                {people.map((person) => (
+                  <Row
+                    key={person.id}
+                    data-row={person.id}
+                    selected={person.id === selected}
+                    className={rowHover}
+                    onClick={() => select(person.id)}
+                  >
+                    <td className="truncate">
+                      <span className="flex min-w-0 items-center gap-2.5">
+                        <Avatar name={person.name} />
+                        <span className="truncate font-medium text-ink">{person.name}</span>
+                        {me?.person.id === person.id ? (
+                          <span className="text-mini text-ink-muted">you</span>
+                        ) : null}
+                      </span>
+                    </td>
+                    <td className="text-ink-secondary">{person.role === "admin" ? "Admin" : "Member"}</td>
+                    <td className="hidden @3xl:table-cell">
+                      {person.can_sign_in ? (
+                        <span className="text-ink-secondary">password set</span>
+                      ) : (
+                        <Badge tone="warning">invited, not yet in</Badge>
+                      )}
+                    </td>
+                    <td className="numeric text-ink-secondary">
+                      {live.filter((key) => key.user_id === person.id).length}
+                    </td>
+                    <td className="hidden text-ink-secondary @4xl:table-cell">{day(person.created_at)}</td>
+                  </Row>
+                ))}
+              </Body>
+            </Table>
+          )
+        }
+        inspector={
+          selected ? (
+            shown ? (
+              <Inspector
+                kicker="Person"
+                title={shown.name}
+                subtitle={
+                  <>
+                    <Badge tone={shown.role === "admin" ? "info" : "neutral"}>
+                      {shown.role === "admin" ? "Admin" : "Member"}
+                    </Badge>
+                    <span>{shown.can_sign_in ? "password set" : "invited, not yet in"}</span>
+                    {yourself ? <span>· you</span> : null}
+                  </>
+                }
+                actions={
+                  <>
+                    <Button onClick={() => void reinvite(shown)}>
+                      <Link2 strokeWidth={1.75} />
+                      {shown.can_sign_in ? "Password reset link" : "New invite link"}
+                    </Button>
+                    {shown.role === "admin" ? (
+                      <Button disabled={yourself} onClick={() => void promote(shown, "member")}>
+                        <ShieldOff strokeWidth={1.75} />
+                        Make a member
+                      </Button>
+                    ) : (
+                      <Button onClick={() => void promote(shown, "admin")}>
+                        <Shield strokeWidth={1.75} />
+                        Make an admin
+                      </Button>
+                    )}
+                    <Button
+                      size="icon"
+                      disabled={yourself}
+                      aria-label={`Remove ${shown.name}`}
+                      onClick={() => void remove(shown)}
+                    >
+                      <Trash2 strokeWidth={1.75} />
+                    </Button>
+                  </>
+                }
+                onClose={close}
+              >
+                <Detail>
+                  <Properties>
+                    <Property name="Role" value={shown.role === "admin" ? "Sees and manages everything" : "Sees their own and what is shared"} />
+                    <Property name="Since" value={day(shown.created_at)} />
+                  </Properties>
+                </Detail>
+                <Detail flush title={`Plans ${theirPlans.length}`}>
+                  {theirPlans.length === 0 ? (
+                    <p className="m-0 px-5 text-small text-ink-secondary">
+                      No plan belongs to them. A plan they sign in to is theirs alone.
+                    </p>
+                  ) : (
+                    <div className="flex flex-col">
+                      {theirPlans.map((account) => (
+                        <Link
+                          key={account.name}
+                          to={`/accounts/${encodeURIComponent(account.name)}`}
+                          className="hover-fade flex h-[var(--row-compact)] items-center gap-3 px-5 text-small hover:bg-panel-hover"
+                        >
+                          <StateDot state={account.state} until={account.cooldown_until} now={Date.now()} />
+                          <span className="min-w-0 flex-1 truncate text-ink">{account.name}</span>
+                          <span className="text-mini text-ink-secondary">
+                            {stateWords(account.state, account.cooldown_until, Date.now())}
+                          </span>
+                        </Link>
+                      ))}
+                    </div>
+                  )}
+                </Detail>
+                <Detail flush title={`Keys ${theirKeys.length}`}>
+                  {theirKeys.length === 0 ? (
+                    <p className="m-0 px-5 text-small text-ink-secondary">No live key.</p>
+                  ) : (
+                    <div className="flex flex-col">
+                      {theirKeys.map((key) => (
+                        <Link
+                          key={key.id}
+                          to={`/keys/${encodeURIComponent(key.id)}`}
+                          className="hover-fade flex h-[var(--row-compact)] items-center gap-3 px-5 text-small hover:bg-panel-hover"
+                        >
+                          <span className="min-w-0 flex-1 truncate text-ink">{key.label}</span>
+                          <span className="text-mini text-ink-secondary">
+                            {key.last_used_at ? `used ${ago(key.last_used_at)}` : "never used"}
+                          </span>
+                        </Link>
+                      ))}
+                    </div>
+                  )}
+                </Detail>
+              </Inspector>
+            ) : (
+              <Inspector kicker="Person" title="Not found" onClose={close}>
+                {users.data ? <Nothing says="Nobody with this id is registered." /> : null}
+              </Inspector>
+            )
+          ) : undefined
+        }
+      />
     </Page>
   );
 }

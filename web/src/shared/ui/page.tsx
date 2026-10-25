@@ -1,50 +1,36 @@
-import { ChevronRight, CircleAlert, Search } from "lucide-react";
+import { CircleAlert } from "lucide-react";
 import type { ReactNode } from "react";
 import { cn } from "@/shared/lib/cn";
-import { MOD } from "@/shared/lib/keys";
-import { useCommands } from "@/shared/model/commands";
-import { Button } from "./button";
-import { Keys } from "./kbd";
-import { Tooltip } from "./tooltip";
 
 export function Page({
   title,
-  trail,
-  note,
-  aside,
+  count,
+  actions,
   toolbar,
   refused,
-  bleed = false,
+  scroll = true,
   children,
 }: {
   title: ReactNode;
-  trail?: ReactNode;
-  note?: ReactNode;
-  aside?: ReactNode;
+  count?: number;
+  actions?: ReactNode;
   toolbar?: ReactNode;
   refused?: string;
-  bleed?: boolean;
+  scroll?: boolean;
   children: ReactNode;
 }) {
   return (
     <div data-slot="page" className="flex h-full min-h-0 flex-col">
-      <header className="flex h-[var(--bar-height)] shrink-0 items-center gap-2 hairline-b border-line-subtle pr-2.5 pl-5 select-none">
-        {trail ? (
-          <>
-            <span className="shrink-0 text-small font-medium text-ink-secondary">{trail}</span>
-            <ChevronRight className="size-3.5 shrink-0 text-ink-muted" strokeWidth={1.75} />
-          </>
-        ) : null}
+      <header className="flex h-[var(--bar-height)] shrink-0 items-center gap-2 hairline-b border-line-subtle pr-3 pl-5 select-none">
         <h1 className="m-0 min-w-0 truncate text-small font-medium text-ink-title">{title}</h1>
-        {note ? <span className="min-w-0 truncate text-small text-ink-secondary">{note}</span> : null}
-        <div className="ml-auto flex shrink-0 items-center gap-1.5">
-          {aside}
-          <CommandButton />
-        </div>
+        {count !== undefined ? (
+          <span className="numeric text-small text-ink-muted">{count.toLocaleString("en-US")}</span>
+        ) : null}
+        {actions ? <div className="ml-auto flex shrink-0 items-center gap-1.5">{actions}</div> : null}
       </header>
 
       {toolbar ? (
-        <div className="flex min-h-[var(--bar-height)] shrink-0 flex-wrap items-center gap-2 hairline-b border-line-subtle px-5 py-2 select-none">
+        <div className="flex min-h-10 shrink-0 flex-wrap items-center gap-2 hairline-b border-line-subtle px-5 py-1.5 select-none">
           {toolbar}
         </div>
       ) : null}
@@ -56,34 +42,38 @@ export function Page({
         </div>
       ) : null}
 
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        {bleed ? (
-          children
-        ) : (
-          <div className="mx-auto flex w-full max-w-[var(--content-max)] flex-col gap-4 px-5 py-5">
-            {children}
-          </div>
-        )}
-      </div>
+      {scroll ? (
+        <div className="min-h-0 flex-1 overflow-y-auto">{children}</div>
+      ) : (
+        <div className="relative flex min-h-0 flex-1">{children}</div>
+      )}
     </div>
   );
 }
 
-function CommandButton() {
-  const show = useCommands((store) => store.show);
-
+export function Section({
+  title,
+  note,
+  aside,
+  className,
+  children,
+}: {
+  title: ReactNode;
+  note?: ReactNode;
+  aside?: ReactNode;
+  className?: string;
+  children: ReactNode;
+}) {
   return (
-    <Tooltip label="Open the command menu" keys={[MOD, "K"]}>
-      <Button tone="ghost" size="small" aria-label="Open the command menu" onClick={show} className="px-2">
-        <Search strokeWidth={1.75} />
-        <Keys keys={[MOD, "K"]} />
-      </Button>
-    </Tooltip>
+    <section data-slot="section" className={cn("flex min-w-0 flex-col", className)}>
+      <header className="flex min-h-11 flex-wrap items-center gap-x-3 gap-y-1 px-5 py-1.5 select-none">
+        <h2 className="m-0 shrink-0 text-small font-medium text-ink-title">{title}</h2>
+        {note ? <span className="min-w-0 truncate text-mini text-ink-secondary">{note}</span> : null}
+        {aside ? <div className="ml-auto flex items-center gap-1.5">{aside}</div> : null}
+      </header>
+      {children}
+    </section>
   );
-}
-
-export function Tiles({ children }: { children: ReactNode }) {
-  return <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">{children}</div>;
 }
 
 const INKS = {
@@ -92,7 +82,15 @@ const INKS = {
   critical: "text-critical-text",
 } as const;
 
-export function Tile({
+export function Stats({ children }: { children: ReactNode }) {
+  return (
+    <div data-slot="stats" className="flex shrink-0 overflow-x-auto hairline-b border-line-subtle">
+      {children}
+    </div>
+  );
+}
+
+export function Stat({
   label,
   value,
   note,
@@ -105,22 +103,19 @@ export function Tile({
 }) {
   return (
     <div
-      data-slot="tile"
-      className="flex min-w-0 flex-col gap-1 rounded-lg hairline border-line bg-panel px-4 pt-3 pb-3.5"
+      data-slot="stat"
+      className="flex min-w-40 flex-1 flex-col gap-1 border-line-subtle px-5 pt-4 pb-4.5 not-first:hairline-l"
     >
-      <span className="flex items-center gap-1.5 truncate text-mini font-medium text-ink-secondary">
-        {tone ? <span className={cn("size-1.5 shrink-0 rounded-full bg-current", INKS[tone])} /> : null}
-        {label}
-      </span>
+      <span className="truncate text-mini text-ink-secondary">{label}</span>
       <span
         className={cn(
-          "numeric display truncate text-headline font-semibold tracking-tight",
+          "numeric display truncate text-headline font-semibold",
           tone ? INKS[tone] : "text-ink-title",
         )}
       >
         {value}
       </span>
-      {note ? <span className="truncate text-mini text-ink-secondary">{note}</span> : null}
+      {note ? <span className="truncate text-mini text-ink-muted">{note}</span> : null}
     </div>
   );
 }
@@ -129,26 +124,24 @@ export function Fact({ name, value }: { name: string; value: ReactNode }) {
   return (
     <div className="flex min-w-0 flex-col gap-0.5">
       <dt className="text-mini text-ink-secondary">{name}</dt>
-      <dd className="numeric m-0 truncate text-small text-ink">{value}</dd>
+      <dd className="numeric m-0 truncate text-small text-ink-title">{value}</dd>
     </div>
   );
 }
 
 export function Facts({ children }: { children: ReactNode }) {
-  return (
-    <dl className="m-0 grid grid-cols-2 gap-x-6 gap-y-4 px-4 pt-1 pb-4 sm:grid-cols-3">{children}</dl>
-  );
+  return <dl className="m-0 grid grid-cols-3 gap-x-4 gap-y-3">{children}</dl>;
 }
 
 export function Property({ name, value }: { name: string; value: ReactNode }) {
   return (
     <div className="grid min-h-8 grid-cols-[7.5rem_minmax(0,1fr)] items-center gap-3">
       <dt className="truncate text-small text-ink-secondary">{name}</dt>
-      <dd className="numeric m-0 min-w-0 truncate text-small text-ink">{value}</dd>
+      <dd className="numeric m-0 flex min-w-0 items-center text-small text-ink">{value}</dd>
     </div>
   );
 }
 
 export function Properties({ children }: { children: ReactNode }) {
-  return <dl className="m-0 flex flex-col px-4 py-2">{children}</dl>;
+  return <dl className="m-0 flex flex-col">{children}</dl>;
 }

@@ -93,11 +93,13 @@
   --large: 18px;
   --title: 20px;
 
-  --sidebar-width: 232px;
+  --sidebar-width: 220px;
   --sidebar-item: 28px;
+  --inspector-width: 420px;
   --bar-height: 44px;
   --group-height: 36px;
   --row-height: 40px;
+  --row-compact: 34px;
   --menu-item: 32px;
   --command-input: 46px;
   --content-max: 1240px;

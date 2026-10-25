@@ -81,7 +81,7 @@ impl Announcer {
 
 pub async fn stream(
     State(app): State<crate::App>,
-    axum::Extension(viewer): axum::Extension<crate::store::Viewer>,
+    axum::Extension(viewer): axum::Extension<crate::store::Person>,
 ) -> Response {
     let everything = viewer.is_admin();
     let happenings = app.announcer().listen().map(move |happening| {

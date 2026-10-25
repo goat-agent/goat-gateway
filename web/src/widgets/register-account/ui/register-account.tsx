@@ -78,15 +78,15 @@ export function RegisterAccount({
 
   const people: Choice<string>[] = (users.data?.users ?? []).map((person) => ({
     value: person.id,
-    label: person.id === me?.person?.id ? `${person.name} (you)` : person.name,
+    label: person.id === me?.person.id ? `${person.name} (you)` : person.name,
   }));
   const yoursFirst = [...people].sort((a, b) =>
-    a.value === me?.person?.id ? -1 : b.value === me?.person?.id ? 1 : 0,
+    a.value === me?.person.id ? -1 : b.value === me?.person.id ? 1 : 0,
   );
-  const planOwners = admin ? yoursFirst : [];
-  const keyOwners: Choice<string>[] = admin ? [{ value: "everyone", label: "Everyone" }, ...yoursFirst] : [];
+  const together = admin && people.length > 1;
+  const planOwners = together ? yoursFirst : [];
+  const keyOwners: Choice<string>[] = together ? [{ value: "everyone", label: "Everyone" }, ...yoursFirst] : [];
   const whose = owner || planOwners[0]?.value || "";
-  const planBlocked = admin && planOwners.length === 0;
 
   const reset = () => {
     setStep({ kind: "choose" });
@@ -176,14 +176,6 @@ export function RegisterAccount({
         <KeyForm provider={step.provider.id} label={step.provider.label} owners={keyOwners} onAdded={added}>
           {back}
         </KeyForm>
-      ) : planBlocked ? (
-        <div className="flex flex-col gap-4">
-          <p className="m-0 text-small text-ink-secondary">
-            A plan belongs to one person, and nobody is registered yet. Say who you are in the banner
-            above, or add a person on the People page, then come back.
-          </p>
-          <div className="flex justify-start">{back}</div>
-        </div>
       ) : step.provider.id === "anthropic" && claudeWay === "token" ? (
         <div className="flex flex-col gap-4">
           <SegmentedControl label="How to add it" value={claudeWay} choices={CLAUDE_WAYS} onChange={setClaudeWay} />

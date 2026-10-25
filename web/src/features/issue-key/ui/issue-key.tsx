@@ -2,7 +2,7 @@ import { Check, Copy } from "lucide-react";
 import { useCallback, useState } from "react";
 import { Button, Dialog, Field, Input, Select } from "@/shared/ui";
 import { send, useHappenings, useResource } from "@/shared/api";
-import type { Key, User } from "@/entities/user";
+import { useMe, type Key, type User } from "@/entities/user";
 import { ConnectGuide } from "./connect-guide";
 
 export function IssueKey({
@@ -22,6 +22,7 @@ export function IssueKey({
   const [refused, setRefused] = useState<string>();
   const [copied, setCopied] = useState(false);
   const keys = useResource<{ keys: Key[] }>(minted ? "/api/keys" : undefined);
+  const me = useMe((store) => store.me);
 
   const reload = keys.reload;
   useHappenings(
@@ -33,7 +34,7 @@ export function IssueKey({
     ),
   );
 
-  const chosen = owner || people[0]?.id || "";
+  const chosen = owner || me?.person.id || "";
   const firstSeen = minted
     ? (keys.data?.keys.find((key) => key.id === minted.id)?.last_used_at ?? null)
     : undefined;

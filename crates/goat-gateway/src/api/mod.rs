@@ -31,7 +31,6 @@ pub fn open_router() -> Router<App> {
 pub fn router() -> Router<App> {
     Router::new()
         .route("/api/me", get(people::me))
-        .route("/api/me/claim", post(people::claim))
         .route("/api/me/password", post(people::set_own_password))
         .route("/api/overview", get(history::overview))
         .route("/api/requests", get(history::requests))
@@ -52,14 +51,6 @@ pub fn router() -> Router<App> {
         .route("/api/providers", get(providers::list))
         .route("/api/keys", get(keys::list).post(keys::issue))
         .route("/api/keys/{id}", delete(keys::revoke))
-        .route(
-            "/api/keys/{id}/demotions",
-            get(keys::demotions).post(keys::keep_off),
-        )
-        .route(
-            "/api/keys/{id}/demotions/{account}",
-            delete(keys::use_again),
-        )
 }
 
 pub fn admin_router() -> Router<App> {

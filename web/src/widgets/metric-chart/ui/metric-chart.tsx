@@ -59,7 +59,7 @@ export function MetricChart({
   const ticks = labelled(up.ticks(4), metric);
 
   return (
-    <figure className="m-0 px-4 pb-2">
+    <figure className="m-0 px-5 pb-2">
       <div ref={held} className="relative" onMouseLeave={() => setHovered(undefined)}>
         {first && !silent && width > 0 ? (
           <svg

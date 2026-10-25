@@ -23,11 +23,23 @@ cargo runs for a release, so the arrangement cannot quietly rot.
 - A feature never imports another feature. If two need composing, that composition is a widget
   — `widgets/register-account` composes the API-key form and the sign-in flow.
 
+## Screens
+
+- A list of things is a `Split`: the list on the left, an `Inspector` on the right. What is
+  selected lives in the URL (`/accounts/:id?`), so it survives a reload and can be linked to.
+  `useSelection` reads and moves it, `useRowKeys` gives the list J, K and Esc.
+- Actions on one thing go in its inspector and its context menu, not as buttons on every row.
+- No boxes around sections inside a page. A `Section` is a heading and its content; hairlines
+  separate them. Boxes are for dialogs and settings groups.
+- A column that hides when the inspector narrows the list uses a container query
+  (`hidden @3xl:table-cell`). Never hide a column in a table with group rows: the group row's
+  `colSpan` then counts a column that is not there.
+
 ## State
 
 zustand, never `localStorage` directly. The `persist` middleware handles storage.
 
-- `shared/model/session` — whether the gateway wants its admin key.
+- `shared/model/session` — whether someone has to sign in.
 - `shared/model/series` — which colour slot an entity holds, per chart.
 - `shared/model/commands` — whether the command menu is open, and the commands pages have
   registered with `useCommand` while they are mounted.
