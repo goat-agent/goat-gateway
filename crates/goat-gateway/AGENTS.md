@@ -19,7 +19,7 @@ credentials — then either passes it through or walks a translation path.
 - `serve.rs` — admit, dispatch, passthrough, and the shape of an error per format.
 - `translate.rs` — one handler for every translating pair, walking `relay_path`.
 - `relay_path.rs` — which hops get from one format to another. Messages is the hub.
-- `provider/` — the declarations, and routing a model to a provider.
+- `provider/` — the declarations, and which providers can serve a model.
 - `pool.rs` — which account serves this, and why the others cannot.
 - `limits.rs` — what a provider said about quota, from headers or from an answer.
 - `quota.rs` — asking providers that only report when asked.
@@ -29,14 +29,15 @@ credentials — then either passes it through or walks a translation path.
 
 ## Routing
 
-- A model belongs to the provider that declares it.
+- A model is served by every provider that declares it and has an account the caller can use.
+  Their accounts are one pool: a ChatGPT plan and an OpenAI key that both declare `gpt-5` take
+  turns, and a spent one hands the model to the other.
 - A model nobody declares goes to the one registered provider that speaks the arriving format.
-  Speaking it natively beats reaching it by translation; that is what keeps a mixed pool
-  unambiguous.
-- When several providers remain, the one whose login the client carried wins, then one the
-  caller owns an account with. Past that, two candidates is an error naming both, not a coin
-  toss.
-- Passthrough is not a flag. It is what happens when `route.endpoint.wire == incoming.wire`.
+  Speaking it natively beats reaching it by translation. When several remain, the one whose
+  login the client carried wins, then one the caller owns an account with. Past that, two
+  candidates is an error naming both, not a coin toss.
+- Each candidate carries its own route. Passthrough is not a flag. It is what happens when
+  `route.endpoint.wire == incoming.wire` for the candidate being tried.
 
 ## Who is asking
 
@@ -53,12 +54,14 @@ credentials — then either passes it through or walks a translation path.
 
 `pool::candidates` takes a `Want` and returns them in order; `pool::pick` is the first.
 
-- Only accounts the caller owns or that are shared with everyone are candidates.
+- Only accounts the caller owns or that are shared with everyone are candidates. A login the
+  client carried comes before all of them.
 - Order: a pin, then the caller's own, then the one that served this conversation for this
   person, then the least quota pressure.
-- A declared refusal (`[[provider.x.refusals]]`) parks nothing and is not remembered. If no byte
-  has reached the client, the request goes once more to the next candidate. One request is one
-  row; earlier attempts are kept in `attempts`.
+- When a candidate cannot serve and no byte has reached the client, the request goes once more
+  to the next one. Cannot serve means a declared refusal (`[[provider.x.refusals]]`), which
+  parks nothing and is not remembered, or an answer that parks the account: a reported limit,
+  or a sign-in that expired. One request is one row; earlier attempts are kept in `attempts`.
 
 - A **pin** must be honoured or the request fails. Reasoning state and turn state belong to one
   account; sending them elsewhere is an error, not a worse answer.

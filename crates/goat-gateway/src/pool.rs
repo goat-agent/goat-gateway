@@ -14,10 +14,10 @@ pub struct Chosen {
 pub enum PoolError {
     #[error(transparent)]
     Store(#[from] StoreError),
-    #[error("no account is registered for {provider}")]
-    NoneRegistered { provider: String },
-    #[error("every {provider} account is unavailable right now. {detail}")]
-    AllUnavailable { provider: String, detail: String },
+    #[error("no account is registered for {providers}")]
+    NoneRegistered { providers: String },
+    #[error("every account for {providers} is unavailable right now. {detail}")]
+    AllUnavailable { providers: String, detail: String },
     #[error(
         "this conversation carries reasoning state minted by account {pinned:?}, which is {state}. \
          Sending it anywhere else would make the model restart its reasoning."
@@ -27,7 +27,7 @@ pub enum PoolError {
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Want<'a> {
-    pub provider: &'a str,
+    pub providers: &'a [&'a str],
     pub scope: Option<&'a str>,
     pub pinned: Option<&'a str>,
     pub prefer: Option<&'a str>,
@@ -35,9 +35,9 @@ pub struct Want<'a> {
 }
 
 impl<'a> Want<'a> {
-    pub fn from(provider: &'a str) -> Self {
+    pub fn from(providers: &'a [&'a str]) -> Self {
         Self {
-            provider,
+            providers,
             ..Self::default()
         }
     }
@@ -46,6 +46,7 @@ impl<'a> Want<'a> {
 #[derive(Debug, Clone)]
 pub struct Candidate {
     pub name: String,
+    pub provider: String,
     pub credential_kind: String,
 }
 
@@ -55,14 +56,14 @@ pub fn pick(store: &Store, want: &Want<'_>) -> Result<Chosen, PoolError> {
             .into_iter()
             .next()
             .ok_or_else(|| PoolError::NoneRegistered {
-                provider: want.provider.to_owned(),
+                providers: want.providers.join(" or "),
             })?;
     load(store, &first.name)
 }
 
 pub fn candidates(store: &Store, want: &Want<'_>) -> Result<Vec<Candidate>, PoolError> {
     let Want {
-        provider,
+        providers,
         scope,
         pinned,
         prefer,
@@ -78,11 +79,11 @@ pub fn candidates(store: &Store, want: &Want<'_>) -> Result<Vec<Candidate>, Pool
 
     let reachable: Vec<_> = accounts
         .iter()
-        .filter(|account| account.provider == provider && visible(&account.owner))
+        .filter(|account| providers.contains(&account.provider.as_str()) && visible(&account.owner))
         .collect();
     if reachable.is_empty() {
         return Err(PoolError::NoneRegistered {
-            provider: provider.to_owned(),
+            providers: providers.join(" or "),
         });
     }
 
@@ -121,7 +122,7 @@ pub fn candidates(store: &Store, want: &Want<'_>) -> Result<Vec<Candidate>, Pool
             .collect::<Vec<_>>()
             .join("; ");
         return Err(PoolError::AllUnavailable {
-            provider: provider.to_owned(),
+            providers: providers.join(" or "),
             detail,
         });
     }
@@ -158,6 +159,7 @@ pub fn candidates(store: &Store, want: &Want<'_>) -> Result<Vec<Candidate>, Pool
 fn candidate(account: &AccountRow) -> Candidate {
     Candidate {
         name: account.name.clone(),
+        provider: account.provider.clone(),
         credential_kind: account.credential_kind.clone(),
     }
 }
@@ -250,7 +252,7 @@ mod tests {
 
     #[test]
     fn an_empty_pool_says_so_plainly() {
-        let error = pick(&store(), &Want::from("anthropic")).unwrap_err();
+        let error = pick(&store(), &Want::from(&["anthropic"])).unwrap_err();
         assert!(matches!(error, PoolError::NoneRegistered { .. }));
     }
 
@@ -263,7 +265,10 @@ mod tests {
                 .unwrap();
             store.set_rate_limits(name, &snapshot(used)).unwrap();
         }
-        assert_eq!(pick(&store, &Want::from("anthropic")).unwrap().name, "idle");
+        assert_eq!(
+            pick(&store, &Want::from(&["anthropic"])).unwrap().name,
+            "idle"
+        );
     }
 
     #[test]
@@ -278,7 +283,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            pick(&store, &Want::from("anthropic")).unwrap().name,
+            pick(&store, &Want::from(&["anthropic"])).unwrap().name,
             "unknown"
         );
     }
@@ -295,13 +300,13 @@ mod tests {
         store
             .set_state("a", AccountState::RateLimited, Some(now() + 60_000))
             .unwrap();
-        assert_eq!(pick(&store, &Want::from("anthropic")).unwrap().name, "b");
+        assert_eq!(pick(&store, &Want::from(&["anthropic"])).unwrap().name, "b");
 
         store
             .set_state("a", AccountState::RateLimited, Some(now() - 1))
             .unwrap();
         store.remove_account("b").unwrap();
-        assert_eq!(pick(&store, &Want::from("anthropic")).unwrap().name, "a");
+        assert_eq!(pick(&store, &Want::from(&["anthropic"])).unwrap().name, "a");
     }
 
     #[test]
@@ -320,7 +325,7 @@ mod tests {
             .set_state("b", AccountState::SignInExpired, None)
             .unwrap();
 
-        let message = pick(&store, &Want::from("anthropic"))
+        let message = pick(&store, &Want::from(&["anthropic"]))
             .unwrap_err()
             .to_string();
         assert!(
@@ -347,7 +352,7 @@ mod tests {
                 &store,
                 &Want {
                     pinned: Some("busy"),
-                    ..Want::from("anthropic")
+                    ..Want::from(&["anthropic"])
                 }
             )
             .unwrap()
@@ -370,7 +375,7 @@ mod tests {
 
         let want = Want {
             prefer: Some("warm"),
-            ..Want::from("anthropic")
+            ..Want::from(&["anthropic"])
         };
         assert_eq!(pick(&store, &want).unwrap().name, "warm");
     }
@@ -390,7 +395,7 @@ mod tests {
 
         let want = Want {
             prefer: Some("warm"),
-            ..Want::from("anthropic")
+            ..Want::from(&["anthropic"])
         };
         assert_eq!(
             pick(&store, &want).unwrap().name,
@@ -416,7 +421,7 @@ mod tests {
             &store,
             &Want {
                 pinned: Some("busy"),
-                ..Want::from("anthropic")
+                ..Want::from(&["anthropic"])
             },
         )
         .unwrap_err();
@@ -432,7 +437,7 @@ mod tests {
             .add_account("anthropic-one", "anthropic", "api_key", b"a")
             .unwrap();
         assert!(matches!(
-            pick(&store, &Want::from("openai")).unwrap_err(),
+            pick(&store, &Want::from(&["openai"])).unwrap_err(),
             PoolError::NoneRegistered { .. }
         ));
     }
@@ -444,7 +449,7 @@ mod tests {
             .add_account("a", "anthropic", "api_key", b"sk-live")
             .unwrap();
         assert_eq!(
-            pick(&store, &Want::from("anthropic")).unwrap().secret,
+            pick(&store, &Want::from(&["anthropic"])).unwrap().secret,
             b"sk-live"
         );
     }
@@ -477,7 +482,7 @@ mod tests {
         let (store, ana, _) = two_people();
         let want = Want {
             person: Some(&ana),
-            ..Want::from("anthropic")
+            ..Want::from(&["anthropic"])
         };
         assert_eq!(names(&store, &want), ["Ana Max", "Team key"]);
     }
@@ -488,7 +493,7 @@ mod tests {
         store.set_rate_limits("Ana Max", &snapshot(90.0)).unwrap();
         let want = Want {
             person: Some(&ana),
-            ..Want::from("anthropic")
+            ..Want::from(&["anthropic"])
         };
         assert_eq!(
             names(&store, &want)[0],
@@ -503,11 +508,38 @@ mod tests {
         let want = Want {
             person: Some(&ana),
             pinned: Some("Mino Max"),
-            ..Want::from("anthropic")
+            ..Want::from(&["anthropic"])
         };
         assert!(matches!(
             candidates(&store, &want),
             Err(PoolError::PinUnavailable { .. })
         ));
+    }
+
+    #[test]
+    fn a_plan_and_a_key_from_different_providers_serving_one_model_are_one_pool() {
+        let store = store();
+        let ana = store.add_user("ana").unwrap();
+        store
+            .add_account("Plan", "chatgpt", "oauth", b"plan")
+            .unwrap();
+        store.set_owner("Plan", Some(&ana.id)).unwrap();
+        store
+            .add_account("Key", "openai", "api_key", b"key")
+            .unwrap();
+        let want = Want {
+            person: Some(&ana.id),
+            ..Want::from(&["chatgpt", "openai"])
+        };
+        assert_eq!(names(&store, &want), ["Plan", "Key"]);
+
+        store
+            .set_state("Plan", AccountState::RateLimited, Some(now() + 60_000))
+            .unwrap();
+        assert_eq!(
+            names(&store, &want),
+            ["Key"],
+            "a spent plan hands its model to the key rather than failing"
+        );
     }
 }

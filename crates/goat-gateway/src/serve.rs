@@ -28,15 +28,22 @@ pub struct Incoming {
 pub struct Plan {
     pub started: i64,
     pub request: Value,
-    pub route: Route,
     pub conversation: Option<String>,
     pub choices: Vec<Choice>,
     pub set_aside: Option<String>,
 }
 
 pub enum Choice {
-    Carried(CarriedCredential),
-    Account(pool::Candidate),
+    Carried(CarriedCredential, Route),
+    Account(pool::Candidate, Route),
+}
+
+impl Choice {
+    pub fn route(&self) -> &Route {
+        match self {
+            Self::Carried(_, route) | Self::Account(_, route) => route,
+        }
+    }
 }
 
 pub struct Ready {
@@ -61,7 +68,7 @@ impl Ready {
 
 pub enum Outcome {
     Served(Response),
-    Refused { response: Response, note: Value },
+    Declined { response: Response, note: Value },
 }
 
 pub fn pinned_account(incoming: &Incoming) -> Option<String> {
@@ -168,35 +175,38 @@ pub fn plan(incoming: &Incoming, pinned: Option<&str>) -> Result<Plan, Box<Respo
         }
     }
 
-    let route = app
+    let routes = app
         .catalog()
-        .route_for(*wire, model, &available, &preferred)
+        .routes_for(*wire, model, &available, &preferred)
         .map_err(|error| refuse(StatusCode::BAD_REQUEST, error.to_string()))?;
     let conversation = goat_gateway_wire::identify(&request);
 
+    let mut choices = Vec::new();
     let mut set_aside = None;
     if let Some(carried) = carried {
-        if carried.provider != route.provider {
-            set_aside = Some(format!(
-                "the login sent beside the gateway key is for {}, and this model is served by {}",
-                carried.provider, route.provider
-            ));
-        } else if !carried.may_reach(&route.endpoint.url) {
-            set_aside = Some(format!(
-                "the login sent beside the gateway key may only go to {}, and {} is declared \
-                 elsewhere",
-                carried.hosts.join(", "),
-                route.provider
-            ));
-        } else {
-            return Ok(Plan {
-                started: now(),
-                request,
-                route,
-                conversation,
-                choices: vec![Choice::Carried(carried.clone())],
-                set_aside: None,
-            });
+        match routes
+            .iter()
+            .find(|route| route.provider == carried.provider)
+        {
+            Some(route) if carried.may_reach(&route.endpoint.url) => {
+                choices.push(Choice::Carried(carried.clone(), route.clone()));
+            }
+            Some(route) => {
+                set_aside = Some(format!(
+                    "the login sent beside the gateway key may only go to {}, and {} is declared \
+                     elsewhere",
+                    carried.hosts.join(", "),
+                    route.provider
+                ));
+            }
+            None => {
+                set_aside = Some(format!(
+                    "the login sent beside the gateway key is for {}, and this model is served by \
+                     {}",
+                    carried.provider,
+                    providers_of(&routes).join(" or ")
+                ));
+            }
         }
     }
 
@@ -206,26 +216,42 @@ pub fn plan(incoming: &Incoming, pinned: Option<&str>) -> Result<Plan, Box<Respo
             .ok()
             .flatten()
     });
+    let providers = providers_of(&routes);
     let candidates = pool::candidates(
         app.store(),
         &pool::Want {
-            provider: &route.provider,
-            scope: route.limit_scope(),
+            providers: &providers,
+            scope: routes.iter().find_map(Route::limit_scope),
             pinned,
             prefer: prefer.as_deref(),
             person: Some(&caller.user_id),
         },
-    )
-    .map_err(|error| refuse(StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?;
+    );
+    match candidates {
+        Ok(candidates) => choices.extend(candidates.into_iter().filter_map(|candidate| {
+            let route = routes
+                .iter()
+                .find(|route| route.provider == candidate.provider)?
+                .clone();
+            Some(Choice::Account(candidate, route))
+        })),
+        Err(error) if choices.is_empty() => {
+            return Err(refuse(StatusCode::SERVICE_UNAVAILABLE, error.to_string()));
+        }
+        Err(_) => {}
+    }
 
     Ok(Plan {
         started: now(),
         request,
-        route,
         conversation,
-        choices: candidates.into_iter().map(Choice::Account).collect(),
+        choices,
         set_aside,
     })
+}
+
+fn providers_of(routes: &[Route]) -> Vec<&str> {
+    routes.iter().map(|route| route.provider.as_str()).collect()
 }
 
 pub async fn prepare(
@@ -234,8 +260,9 @@ pub async fn prepare(
     choice: &Choice,
     attempts: Vec<Value>,
 ) -> Result<Ready, Box<Response>> {
+    let route = choice.route();
     let (account, credential, auth) = match choice {
-        Choice::Carried(carried) => (
+        Choice::Carried(carried, _) => (
             None,
             "carried".to_owned(),
             Auth::Carried {
@@ -243,7 +270,7 @@ pub async fn prepare(
                 value: carried.value.clone(),
             },
         ),
-        Choice::Account(candidate) => {
+        Choice::Account(candidate, _) => {
             let unavailable = |message: String| {
                 Box::new(reject(
                     incoming.wire,
@@ -256,16 +283,16 @@ pub async fn prepare(
             let prepared = crate::oauth::prepare(
                 incoming.app.store(),
                 &incoming.app.oauth_client(),
-                incoming.app.catalog().flow(&plan.route.provider),
+                incoming.app.catalog().flow(&route.provider),
                 &chosen.name,
-                &plan.route.provider,
+                &route.provider,
                 &chosen.credential_kind,
                 &chosen.secret,
             )
             .await
             .map_err(|error| unavailable(error.to_string()))?;
             let auth = match prepared.auth {
-                Auth::ApiKey(secret) => Auth::presented(plan.route.key, secret),
+                Auth::ApiKey(secret) => Auth::presented(route.key, secret),
                 carried => carried,
             };
             (Some(chosen.name), chosen.credential_kind, auth)
@@ -275,7 +302,7 @@ pub async fn prepare(
     Ok(Ready {
         started: plan.started,
         request: plan.request.clone(),
-        route: plan.route.clone(),
+        route: route.clone(),
         account,
         credential,
         auth,
@@ -396,22 +423,6 @@ pub async fn dispatch(
         Err(response) => return *response,
     };
 
-    let egress = plan.route.endpoint.wire;
-    let hops = if wire == egress {
-        None
-    } else {
-        match crate::relay_path::path(wire, egress) {
-            Some(hops) => Some(hops),
-            None => {
-                return reject(
-                    wire,
-                    StatusCode::BAD_REQUEST,
-                    format!("this gateway cannot turn {wire} into {egress}"),
-                );
-            }
-        }
-    };
-
     let mut attempts: Vec<Value> = plan
         .set_aside
         .iter()
@@ -419,6 +430,21 @@ pub async fn dispatch(
         .collect();
     let tries = plan.choices.len().min(TRIES);
     for (index, choice) in plan.choices.iter().take(TRIES).enumerate() {
+        let egress = choice.route().endpoint.wire;
+        let hops = if wire == egress {
+            None
+        } else {
+            match crate::relay_path::path(wire, egress) {
+                Some(hops) => Some(hops),
+                None => {
+                    return reject(
+                        wire,
+                        StatusCode::BAD_REQUEST,
+                        format!("this gateway cannot turn {wire} into {egress}"),
+                    );
+                }
+            }
+        };
         let ready = match prepare(&incoming, &plan, choice, attempts.clone()).await {
             Ok(ready) => ready,
             Err(response) => return *response,
@@ -429,7 +455,7 @@ pub async fn dispatch(
         };
         match outcome {
             Outcome::Served(response) => return response,
-            Outcome::Refused { response, note } => {
+            Outcome::Declined { response, note } => {
                 if index + 1 >= tries {
                     return response;
                 }
@@ -449,19 +475,24 @@ pub async fn count_tokens(app: App, caller: Caller, headers: HeaderMap, body: By
         Ok(plan) => plan,
         Err(response) => return *response,
     };
-    if plan.route.endpoint.wire != Wire::Messages {
+    let Some(first) = plan.choices.first() else {
+        return gateway_error("no account was left to try".to_owned());
+    };
+    let Some(choice) = plan
+        .choices
+        .iter()
+        .find(|choice| choice.route().endpoint.wire == Wire::Messages)
+    else {
         return reject(
             Wire::Messages,
             StatusCode::BAD_REQUEST,
             format!(
                 "counting tokens needs a provider that serves the Messages format, and {} serves \
                  this model in the {} format",
-                plan.route.provider, plan.route.endpoint.wire
+                first.route().provider,
+                first.route().endpoint.wire
             ),
         );
-    }
-    let Some(choice) = plan.choices.first() else {
-        return gateway_error("no account was left to try".to_owned());
     };
     let ready = match prepare(&incoming, &plan, choice, Vec::new()).await {
         Ok(ready) => ready,
@@ -575,45 +606,54 @@ pub async fn answered_with_failure(
     row.error_message = failure.said.clone();
     row.duration_ms = Some(now() - ready.started);
 
+    let declined = |kind: &str| {
+        json!({
+            "account": ready.account,
+            "credential": kind,
+            "status": status,
+            "said": failure.said,
+        })
+    };
+
     let Some(account) = &ready.account else {
         settle_failure(&incoming.app, &row);
-        return Outcome::Served(failure.relayed);
+        let snapshot = crate::limits::parse(&headers, now());
+        return match crate::limits::classify(status, &headers, &snapshot) {
+            crate::limits::Verdict::Exhausted { .. } => Outcome::Declined {
+                note: declined("carried"),
+                response: failure.relayed,
+            },
+            _ => Outcome::Served(failure.relayed),
+        };
     };
 
     let snapshot = crate::observe_limits(&incoming.app, account, &headers);
-    let refusal = incoming
+    let refused = incoming
         .app
         .catalog()
         .get(&ready.route.provider)
         .and_then(|provider| {
-            provider
-                .refusal(
-                    status,
-                    &failure.body,
-                    failure.said.as_deref(),
-                    &ready.credential,
-                )
-                .cloned()
-        });
+            provider.refusal(
+                status,
+                &failure.body,
+                failure.said.as_deref(),
+                &ready.credential,
+            )
+        })
+        .is_some();
+    if refused {
+        row.error_kind = Some("refused".into());
+    }
+    let taken_out = !refused && crate::judge(&incoming.app, account, status, &headers, &snapshot);
+    settle_failure(&incoming.app, &row);
 
-    match refusal {
-        Some(_) => {
-            row.error_kind = Some("refused".into());
-            settle_failure(&incoming.app, &row);
-            Outcome::Refused {
-                response: failure.relayed,
-                note: json!({
-                    "account": account,
-                    "status": status,
-                    "said": failure.said,
-                }),
-            }
+    if refused || taken_out {
+        Outcome::Declined {
+            note: declined(&ready.credential),
+            response: failure.relayed,
         }
-        None => {
-            crate::judge(&incoming.app, account, status, &headers, &snapshot);
-            settle_failure(&incoming.app, &row);
-            Outcome::Served(failure.relayed)
-        }
+    } else {
+        Outcome::Served(failure.relayed)
     }
 }
 

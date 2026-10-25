@@ -59,7 +59,7 @@ export function RequestInspector({ id, onClose }: { id: string; onClose: () => v
       ) : null}
 
       {request.attempts && request.attempts.length > 0 ? (
-        <Detail title="Tried first" aside="refused before a byte reached the client">
+        <Detail title="Tried first" aside="could not serve it, so it moved on before a byte reached the client">
           <ul className="m-0 flex list-none flex-col gap-2.5 p-0">
             {request.attempts.map((attempt, index) => (
               <TriedFirst key={index} attempt={attempt} />
@@ -129,8 +129,8 @@ function TriedFirst({ attempt }: { attempt: Attempt }) {
   return (
     <li className="flex min-w-0 flex-col gap-0.5 text-small">
       <span className="flex items-center gap-2">
-        <span className="font-medium text-ink">{attempt.account}</span>
-        <span className="numeric text-critical-text">refused with {attempt.status}</span>
+        <span className="font-medium text-ink">{attempt.account ?? "The client's own login"}</span>
+        <span className="numeric text-critical-text">answered {attempt.status}</span>
       </span>
       {attempt.said ? (
         <span className="mono truncate text-ink-secondary select-text">{attempt.said}</span>

@@ -422,13 +422,13 @@ impl Catalog {
         self.get(provider)?.model(model)
     }
 
-    pub fn route(
+    pub fn routes(
         &self,
         ingress: Wire,
         model: &str,
         available: &[String],
-    ) -> Result<Route, Unroutable> {
-        self.route_for(ingress, model, available, &[])
+    ) -> Result<Vec<Route>, Unroutable> {
+        self.routes_for(ingress, model, available, &[])
     }
 
     pub fn recognize(
@@ -456,45 +456,58 @@ impl Catalog {
         Some(found.ok_or_else(|| presented.0.to_owned()))
     }
 
-    pub fn route_for(
+    pub fn routes_for(
+        &self,
+        ingress: Wire,
+        model: &str,
+        available: &[String],
+        preferred: &[String],
+    ) -> Result<Vec<Route>, Unroutable> {
+        let declaring: Vec<(&Provider, &Model)> = self
+            .iter()
+            .filter_map(|provider| Some((provider, provider.model(model)?)))
+            .collect();
+
+        if declaring.is_empty() {
+            return self
+                .undeclared_route(ingress, model, available, preferred)
+                .map(|route| vec![route]);
+        }
+
+        let registered: Vec<(&Provider, &Model)> = declaring
+            .iter()
+            .copied()
+            .filter(|(provider, _)| available.contains(&provider.id))
+            .collect();
+        let serving = if registered.is_empty() {
+            declaring
+        } else {
+            registered
+        };
+
+        let mut routes = Vec::new();
+        let mut refused = None;
+        for (provider, declared) in serving {
+            match provider.route(ingress, model, Some(declared.clone())) {
+                Ok(route) => routes.push(route),
+                Err(error) => {
+                    refused.get_or_insert(error);
+                }
+            }
+        }
+        match (routes.is_empty(), refused) {
+            (true, Some(error)) => Err(error),
+            _ => Ok(routes),
+        }
+    }
+
+    fn undeclared_route(
         &self,
         ingress: Wire,
         model: &str,
         available: &[String],
         preferred: &[String],
     ) -> Result<Route, Unroutable> {
-        let declaring: Vec<(&Provider, &Model)> = self
-            .iter()
-            .filter_map(|provider| Some((provider, provider.model(model)?)))
-            .collect();
-
-        if let [(provider, declared)] = declaring.as_slice() {
-            return provider.route(ingress, model, Some((*declared).clone()));
-        }
-
-        if !declaring.is_empty() {
-            let registered: Vec<&Provider> = declaring
-                .iter()
-                .map(|(provider, _)| *provider)
-                .filter(|provider| available.contains(&provider.id))
-                .collect();
-            if registered.is_empty() {
-                let (first, declared) = declaring[0];
-                return first.route(ingress, model, Some(declared.clone()));
-            }
-            return match shortlist(registered, ingress).as_slice() {
-                [] => Err(Unroutable::NobodySpeaks { wire: ingress }),
-                [only] => only.route(ingress, model, only.model(model).cloned()),
-                several => match favourite(several, preferred) {
-                    Some(chosen) => chosen.route(ingress, model, chosen.model(model).cloned()),
-                    None => Err(Unroutable::DeclaredBySeveral {
-                        model: model.to_owned(),
-                        candidates: labels(several),
-                    }),
-                },
-            };
-        }
-
         let registered: Vec<&Provider> = self
             .iter()
             .filter(|provider| available.contains(&provider.id))
@@ -591,11 +604,6 @@ pub enum Unroutable {
     )]
     Ambiguous { model: String, candidates: String },
     #[error(
-        "model {model:?} is declared by {candidates}, and accounts are registered for each. \
-         Remove it from all but one of them in config.toml, or keep accounts for only one."
-    )]
-    DeclaredBySeveral { model: String, candidates: String },
-    #[error(
         "model {model:?} has to be translated into {wire} to be served, and translating needs it \
          declared with thinking and max_tokens, so the gateway knows how it reasons and how much \
          it may write. Declared models: {known}"
@@ -653,6 +661,21 @@ mod tests {
                 .price
                 .is_some()
         );
+    }
+
+    fn one(
+        catalog: &Catalog,
+        ingress: Wire,
+        model: &str,
+        available: &[String],
+    ) -> Result<Route, Unroutable> {
+        let mut routes = catalog.routes(ingress, model, available)?;
+        assert_eq!(
+            routes.len(),
+            1,
+            "{model} should have exactly one way to be served"
+        );
+        Ok(routes.remove(0))
     }
 
     fn both() -> Vec<String> {
@@ -720,14 +743,12 @@ mod tests {
     #[test]
     fn a_model_goes_to_the_provider_that_declares_it() {
         let catalog = Catalog::builtin();
-        let route = catalog
-            .route(Wire::Responses, "gpt-5", &both())
-            .expect("openai declares gpt-5");
+        let route =
+            one(&catalog, Wire::Responses, "gpt-5", &both()).expect("openai declares gpt-5");
         assert_eq!(route.provider, "openai");
         assert!(!route.translates_from(Wire::Responses));
 
-        let route = catalog
-            .route(Wire::Responses, "claude-sonnet-5", &both())
+        let route = one(&catalog, Wire::Responses, "claude-sonnet-5", &both())
             .expect("anthropic declares claude-sonnet-5");
         assert_eq!(route.provider, "anthropic");
         assert!(
@@ -739,15 +760,18 @@ mod tests {
     #[test]
     fn a_model_that_shipped_after_us_still_reaches_the_provider_that_speaks_the_format() {
         let catalog = Catalog::builtin();
-        let route = catalog
-            .route(Wire::Responses, "gpt-6-that-shipped-today", &both())
-            .expect("openai speaks Responses natively and anthropic does not");
+        let route = one(
+            &catalog,
+            Wire::Responses,
+            "gpt-6-that-shipped-today",
+            &both(),
+        )
+        .expect("openai speaks Responses natively and anthropic does not");
         assert_eq!(route.provider, "openai");
         assert!(route.model.is_none());
         assert!(!route.translates_from(Wire::Responses));
 
-        let route = catalog
-            .route(Wire::Messages, "claude-sonnet-6", &both())
+        let route = one(&catalog, Wire::Messages, "claude-sonnet-6", &both())
             .expect("only anthropic speaks Messages");
         assert_eq!(route.provider, "anthropic");
         assert!(!route.translates_from(Wire::Messages));
@@ -756,13 +780,13 @@ mod tests {
     #[test]
     fn an_undeclared_model_that_needs_translating_is_refused_with_what_is_known() {
         let catalog = Catalog::builtin();
-        let error = catalog
-            .route(
-                Wire::Responses,
-                "claude-sonnet-6",
-                &["anthropic".to_owned()],
-            )
-            .unwrap_err();
+        let error = one(
+            &catalog,
+            Wire::Responses,
+            "claude-sonnet-6",
+            &["anthropic".to_owned()],
+        )
+        .unwrap_err();
         let message = error.to_string();
         assert!(matches!(error, Unroutable::Undeclared { .. }));
         assert!(message.contains("claude-sonnet-6"), "{message}");
@@ -772,7 +796,7 @@ mod tests {
     #[test]
     fn a_format_no_registered_account_serves_says_so() {
         let catalog = Catalog::builtin();
-        let error = catalog.route(Wire::Chat, "whatever", &[]).unwrap_err();
+        let error = one(&catalog, Wire::Chat, "whatever", &[]).unwrap_err();
         assert!(matches!(error, Unroutable::NobodySpeaks { .. }));
     }
 
@@ -782,8 +806,7 @@ mod tests {
         let registered = ["anthropic".to_owned()];
 
         for wire in [Wire::Messages, Wire::Responses, Wire::Chat] {
-            let route = catalog
-                .route(wire, "claude-sonnet-5", &registered)
+            let route = one(&catalog, wire, "claude-sonnet-5", &registered)
                 .unwrap_or_else(|error| panic!("{wire} could not be served: {error}"));
             assert_eq!(route.provider, "anthropic");
             assert_eq!(route.endpoint.wire, Wire::Messages);
@@ -793,7 +816,12 @@ mod tests {
     #[test]
     fn an_account_nobody_registered_never_wins_the_toss() {
         let catalog = Catalog::builtin();
-        let route = catalog.route(Wire::Responses, "unknown", &["anthropic".to_owned()]);
+        let route = one(
+            &catalog,
+            Wire::Responses,
+            "unknown",
+            &["anthropic".to_owned()],
+        );
         assert!(
             matches!(route, Err(Unroutable::Undeclared { .. })),
             "with no openai account the only candidate is anthropic, by translation"
@@ -864,46 +892,39 @@ mod tests {
     fn a_model_two_providers_declare_goes_to_the_one_with_an_account() {
         let catalog = Catalog::builtin();
         for registered in ["chatgpt", "chatgpt_signin", "openai"] {
-            let route = catalog
-                .route(Wire::Responses, "gpt-5", &[registered.to_owned()])
+            let route = one(&catalog, Wire::Responses, "gpt-5", &[registered.to_owned()])
                 .unwrap_or_else(|error| panic!("{registered}: {error}"));
             assert_eq!(route.provider, registered);
         }
     }
 
     #[test]
-    fn of_two_registered_providers_declaring_a_model_the_native_speaker_wins() {
+    fn a_model_several_providers_declare_is_served_by_every_one_with_an_account() {
         let catalog = Catalog::builtin();
-        let route = catalog
-            .route(
-                Wire::Chat,
-                "gpt-5",
-                &["chatgpt".to_owned(), "openai".to_owned()],
-            )
-            .unwrap();
-        assert_eq!(route.provider, "openai");
-        assert!(!route.translates_from(Wire::Chat));
+        let registered = [
+            "chatgpt".to_owned(),
+            "openai".to_owned(),
+            "anthropic".to_owned(),
+        ];
+        for wire in [Wire::Responses, Wire::Chat, Wire::Messages] {
+            let routes = catalog.routes(wire, "gpt-5", &registered).unwrap();
+            let providers: Vec<&str> = routes.iter().map(|route| route.provider.as_str()).collect();
+            assert_eq!(
+                providers,
+                ["chatgpt", "openai"],
+                "{wire}: a plan and a key that both serve gpt-5 are one pool"
+            );
+        }
     }
 
     #[test]
-    fn two_registered_providers_that_both_serve_a_model_natively_are_named_not_tossed() {
+    fn a_model_nobody_has_an_account_for_names_every_provider_that_could_serve_it() {
         let catalog = Catalog::builtin();
-        let error = catalog
-            .route(
-                Wire::Responses,
-                "gpt-5",
-                &["chatgpt".to_owned(), "openai".to_owned()],
-            )
-            .unwrap_err();
-        let message = error.to_string();
-        assert!(
-            matches!(error, Unroutable::DeclaredBySeveral { .. }),
-            "{message}"
-        );
-        assert!(
-            message.contains("ChatGPT") && message.contains("OpenAI"),
-            "{message}"
-        );
+        let routes = catalog
+            .routes(Wire::Responses, "gpt-5", &["anthropic".to_owned()])
+            .unwrap();
+        let providers: Vec<&str> = routes.iter().map(|route| route.provider.as_str()).collect();
+        assert_eq!(providers, ["chatgpt", "chatgpt_signin", "openai"]);
     }
 
     #[test]

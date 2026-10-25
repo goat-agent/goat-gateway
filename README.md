@@ -16,7 +16,8 @@ Register the AI accounts you already have. Point every client at one address.
 A request in a format the provider already serves goes through **byte for byte**. Anything
 else is translated, and every field that could not come along is written down where you can
 see it. API keys can be shared; a plan you signed in to is yours alone, and a request goes to
-whichever account you may use that can serve it.
+whichever account you may use that can serve its model, whichever provider that account is
+with.
 
 ## Running it
 
