@@ -14,19 +14,16 @@ carried = [
 status = 400
 says = "Third-party apps now draw from your extra usage"
 credential = "oauth"
-demote_minutes = 1440
 
 [[provider.anthropic.refusals]]
 status = 400
 says = "only authorized for use with Claude Code"
 credential = "oauth"
-demote_minutes = 1440
 
 [[provider.anthropic.refusals]]
 status = 429
 message = "Error"
 credential = "oauth"
-demote_minutes = 60
 
 [provider.anthropic.sign_in]
 label = "Claude Pro/Max"
@@ -222,7 +219,7 @@ name = "glm-4.5-air"
 label = "Kimi Coding Plan"
 limits = { endpoint = { url = "https://api.kimi.com/coding/v1/usages" } }
 endpoints = [{ wire = "chat", url = "https://api.kimi.com/coding/v1/chat/completions" }]
-refusals = [{ status = 403, says = "access_terminated_error", demote_minutes = 1440 }]
+refusals = [{ status = 403, says = "access_terminated_error" }]
 
 [[provider.kimi.models]]
 name = "kimi-for-coding"

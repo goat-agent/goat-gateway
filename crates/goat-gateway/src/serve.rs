@@ -214,7 +214,6 @@ pub fn plan(incoming: &Incoming, pinned: Option<&str>) -> Result<Plan, Box<Respo
             pinned,
             prefer: prefer.as_deref(),
             person: Some(&caller.user_id),
-            key: Some(&caller.key_id),
         },
     )
     .map_err(|error| refuse(StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?;
@@ -598,17 +597,7 @@ pub async fn answered_with_failure(
         });
 
     match refusal {
-        Some(refusal) => {
-            let cause = failure
-                .said
-                .clone()
-                .unwrap_or_else(|| format!("refused with {status}"));
-            let until = now() + i64::from(refusal.demote_minutes) * 60_000;
-            let _ =
-                incoming
-                    .app
-                    .store()
-                    .demote(&incoming.caller.key_id, account, Some(until), &cause);
+        Some(_) => {
             row.error_kind = Some("refused".into());
             settle_failure(&incoming.app, &row);
             Outcome::Refused {

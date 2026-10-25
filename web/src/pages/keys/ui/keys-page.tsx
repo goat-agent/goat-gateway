@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ArrowDownToLine, KeyRound, MoreHorizontal, Plug, Plus, Trash2 } from "lucide-react";
+import { KeyRound, MoreHorizontal, Plug, Plus, Trash2 } from "lucide-react";
 import {
   Badge,
   Body,
@@ -8,7 +8,6 @@ import {
   Head,
   Menu,
   MenuItem,
-  MenuSeparator,
   Nothing,
   Page,
   Row,
@@ -22,7 +21,6 @@ import { useCommand } from "@/shared/model/commands";
 import { useMe, type Key, type User } from "@/entities/user";
 import { ago, day } from "@/shared/lib/format";
 import { ConnectGuide, IssueKey } from "@/features/issue-key";
-import { KeyDemotions } from "@/features/key-demotions";
 
 const COLUMNS = 5;
 
@@ -34,7 +32,6 @@ export function KeysPage() {
 
   const [issuing, setIssuing] = useState(false);
   const [guiding, setGuiding] = useState(false);
-  const [demoting, setDemoting] = useState<Key>();
 
   const people = users.data?.users ?? [];
   const live = (keys.data?.keys ?? []).filter((key) => key.revoked_at === null);
@@ -104,7 +101,6 @@ export function KeysPage() {
       >
         <ConnectGuide />
       </Dialog>
-      <KeyDemotions open={demoting !== undefined} keyRow={demoting} onClose={() => setDemoting(undefined)} />
 
       {live.length === 0 ? (
         <Nothing
@@ -166,10 +162,6 @@ export function KeysPage() {
                           </Button>
                         }
                       >
-                        <MenuItem icon={ArrowDownToLine} onClick={() => setDemoting(key)}>
-                          Where it goes last
-                        </MenuItem>
-                        <MenuSeparator />
                         <MenuItem icon={Trash2} danger onClick={() => void revoke(key)}>
                           Revoke
                         </MenuItem>

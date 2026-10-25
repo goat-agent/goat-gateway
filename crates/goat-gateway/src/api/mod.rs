@@ -52,14 +52,6 @@ pub fn router() -> Router<App> {
         .route("/api/providers", get(providers::list))
         .route("/api/keys", get(keys::list).post(keys::issue))
         .route("/api/keys/{id}", delete(keys::revoke))
-        .route(
-            "/api/keys/{id}/demotions",
-            get(keys::demotions).post(keys::keep_off),
-        )
-        .route(
-            "/api/keys/{id}/demotions/{account}",
-            delete(keys::use_again),
-        )
 }
 
 pub fn admin_router() -> Router<App> {

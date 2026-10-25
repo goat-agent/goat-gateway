@@ -95,7 +95,7 @@ everything else is a translation. The rest of a declaration says what the gatewa
 ```toml
 check = "https://api.example.com/v1/models"   # the connection test asks this and spends nothing
 carried = [{ header = "authorization", starts_with = "Bearer sk-ex-", hosts = ["api.example.com"] }]
-refusals = [{ status = 400, says = "not for this client", demote_minutes = 1440 }]
+refusals = [{ status = 400, says = "not for this client" }]   # moves the request to the next account
 
 [[provider.example.endpoints]]
 wire = "responses"

@@ -160,7 +160,6 @@ pub struct Refusal {
     pub message: Option<String>,
     #[serde(default)]
     pub credential: Option<String>,
-    pub demote_minutes: u32,
 }
 
 impl Refusal {

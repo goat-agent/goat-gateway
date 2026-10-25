@@ -23,9 +23,3 @@ export type Key = {
   revoked_at: number | null;
 };
 
-export type Demotion = {
-  account: string;
-  until: number | null;
-  cause: string;
-  set_at: number;
-};

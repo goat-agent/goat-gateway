@@ -16,7 +16,7 @@ use rusqlite::{Connection, OptionalExtension as _, params};
 pub use crate::store::auth::{
     ADMIN_PREFIX, Caller, Issued, KeyRow, Person, Role, UserRow, Viewer, mint,
 };
-pub use crate::store::records::{AccountRow, AccountState, Demotion, RequestRow, Usage};
+pub use crate::store::records::{AccountRow, AccountState, RequestRow, Usage};
 
 pub mod insight;
 mod records;
@@ -281,44 +281,6 @@ mod tests {
                 .all(|user| user.role == auth::Role::Member),
             "which of several people is the admin is not something a migration can know"
         );
-    }
-
-    #[test]
-    fn a_demotion_lasts_until_it_runs_out_and_a_hand_set_one_until_it_is_lifted() {
-        let store = Store::in_memory(&[3u8; 32]).unwrap();
-        let ana = store.add_user("ana").unwrap();
-        let key = store.issue_key(&ana.id, "pi").unwrap();
-        store
-            .add_account("Max", "anthropic", "oauth", b"{}")
-            .unwrap();
-        store
-            .add_account("Old", "anthropic", "oauth", b"{}")
-            .unwrap();
-        store
-            .add_account("Kept off", "anthropic", "oauth", b"{}")
-            .unwrap();
-
-        store
-            .demote(&key.id, "Max", Some(now() + 60_000), "refused")
-            .unwrap();
-        store
-            .demote(&key.id, "Old", Some(now() - 1), "refused")
-            .unwrap();
-        store
-            .demote(&key.id, "Kept off", None, "set by hand")
-            .unwrap();
-
-        let mut live: Vec<String> = store
-            .demotions(&key.id)
-            .unwrap()
-            .into_iter()
-            .map(|demotion| demotion.account)
-            .collect();
-        live.sort();
-        assert_eq!(live, ["Kept off", "Max"]);
-
-        store.undemote(&key.id, "Kept off").unwrap();
-        assert_eq!(store.demotions(&key.id).unwrap().len(), 1);
     }
 
     #[test]

@@ -84,14 +84,6 @@ pub struct RequestRow {
     pub attempts: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct Demotion {
-    pub account: String,
-    pub until: Option<i64>,
-    pub cause: String,
-    pub set_at: i64,
-}
-
 impl Store {
     pub fn add_account(
         &self,
@@ -364,52 +356,6 @@ pub(crate) fn read_request(row: &rusqlite::Row<'_>) -> rusqlite::Result<RequestR
 }
 
 impl Store {
-    pub fn demote(
-        &self,
-        key_id: &str,
-        account: &str,
-        until: Option<i64>,
-        cause: &str,
-    ) -> Result<(), StoreError> {
-        let connection = self.connection.lock().expect("store mutex");
-        connection.execute(
-            "INSERT INTO demotions (key_id, account, until, cause, set_at) VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(key_id, account) DO UPDATE SET
-                 until = excluded.until, cause = excluded.cause, set_at = excluded.set_at",
-            params![key_id, account, until, cause, now()],
-        )?;
-        Ok(())
-    }
-
-    pub fn undemote(&self, key_id: &str, account: &str) -> Result<(), StoreError> {
-        let connection = self.connection.lock().expect("store mutex");
-        connection.execute(
-            "DELETE FROM demotions WHERE key_id = ?1 AND account = ?2",
-            params![key_id, account],
-        )?;
-        Ok(())
-    }
-
-    pub fn demotions(&self, key_id: &str) -> Result<Vec<Demotion>, StoreError> {
-        let connection = self.connection.lock().expect("store mutex");
-        let mut statement = connection.prepare(
-            "SELECT account, until, cause, set_at FROM demotions
-             WHERE key_id = ?1 AND (until IS NULL OR until > ?2)
-             ORDER BY account",
-        )?;
-        let rows = statement
-            .query_map(params![key_id, now()], |row| {
-                Ok(Demotion {
-                    account: row.get(0)?,
-                    until: row.get(1)?,
-                    cause: row.get(2)?,
-                    set_at: row.get(3)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
-    }
-
     pub fn set_rate_limits(
         &self,
         account: &str,

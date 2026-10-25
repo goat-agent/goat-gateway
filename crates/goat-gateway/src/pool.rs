@@ -32,7 +32,6 @@ pub struct Want<'a> {
     pub pinned: Option<&'a str>,
     pub prefer: Option<&'a str>,
     pub person: Option<&'a str>,
-    pub key: Option<&'a str>,
 }
 
 impl<'a> Want<'a> {
@@ -68,7 +67,6 @@ pub fn candidates(store: &Store, want: &Want<'_>) -> Result<Vec<Candidate>, Pool
         pinned,
         prefer,
         person,
-        key,
     } = *want;
 
     store.clear_expired_cooldowns()?;
@@ -105,32 +103,20 @@ pub fn candidates(store: &Store, want: &Want<'_>) -> Result<Vec<Candidate>, Pool
         return Ok(vec![candidate(account)]);
     }
 
-    let demoted = match key {
-        Some(key) => store.demotions(key)?,
-        None => Vec::new(),
-    };
-    let kept_off = |name: &str| {
-        demoted
-            .iter()
-            .any(|demotion| demotion.account == name && demotion.until.is_none())
-    };
-    let tried_last = |name: &str| demoted.iter().any(|demotion| demotion.account == name);
-
     let mut usable: Vec<_> = reachable
         .iter()
-        .filter(|account| account.state == AccountState::Active && !kept_off(&account.name))
+        .filter(|account| account.state == AccountState::Active)
         .collect();
 
     if usable.is_empty() {
         let detail = reachable
             .iter()
             .map(|account| {
-                let why = if kept_off(&account.name) {
-                    "kept off this key by hand".to_owned()
-                } else {
+                format!(
+                    "{} is {}",
+                    account.name,
                     describe(account.state, account.cooldown_until)
-                };
-                format!("{} is {why}", account.name)
+                )
             })
             .collect::<Vec<_>>()
             .join("; ");
@@ -152,9 +138,8 @@ pub fn candidates(store: &Store, want: &Want<'_>) -> Result<Vec<Candidate>, Pool
     let cold = |account: &AccountRow| prefer != Some(account.name.as_str());
 
     usable.sort_by(|a, b| {
-        tried_last(&a.name)
-            .cmp(&tried_last(&b.name))
-            .then_with(|| shared(a).cmp(&shared(b)))
+        shared(a)
+            .cmp(&shared(b))
             .then_with(|| cold(a).cmp(&cold(b)))
             .then_with(|| {
                 pressure(&a.name)
@@ -464,11 +449,10 @@ mod tests {
         );
     }
 
-    fn two_people() -> (Store, String, String, String) {
+    fn two_people() -> (Store, String, String) {
         let store = store();
         let ana = store.add_user("ana").unwrap();
         let mino = store.add_user("mino").unwrap();
-        let key = store.issue_key(&ana.id, "pi").unwrap();
         for (name, owner) in [
             ("Ana Max", Some(ana.id.as_str())),
             ("Mino Max", Some(mino.id.as_str())),
@@ -477,7 +461,7 @@ mod tests {
             store.add_account(name, "anthropic", "oauth", b"x").unwrap();
             store.set_owner(name, owner).unwrap();
         }
-        (store, ana.id, mino.id, key.id)
+        (store, ana.id, mino.id)
     }
 
     fn names(store: &Store, want: &Want<'_>) -> Vec<String> {
@@ -490,10 +474,9 @@ mod tests {
 
     #[test]
     fn someone_elses_plan_is_never_a_candidate() {
-        let (store, ana, _, key) = two_people();
+        let (store, ana, _) = two_people();
         let want = Want {
             person: Some(&ana),
-            key: Some(&key),
             ..Want::from("anthropic")
         };
         assert_eq!(names(&store, &want), ["Ana Max", "Team key"]);
@@ -501,11 +484,10 @@ mod tests {
 
     #[test]
     fn your_own_account_comes_before_the_shared_one() {
-        let (store, ana, _, key) = two_people();
+        let (store, ana, _) = two_people();
         store.set_rate_limits("Ana Max", &snapshot(90.0)).unwrap();
         let want = Want {
             person: Some(&ana),
-            key: Some(&key),
             ..Want::from("anthropic")
         };
         assert_eq!(
@@ -516,45 +498,10 @@ mod tests {
     }
 
     #[test]
-    fn a_demoted_account_is_tried_last_and_a_kept_off_one_not_at_all() {
-        let (store, ana, _, key) = two_people();
-        store
-            .demote(&key, "Ana Max", Some(now() + 60_000), "refused")
-            .unwrap();
-        let want = Want {
-            person: Some(&ana),
-            key: Some(&key),
-            ..Want::from("anthropic")
-        };
-        assert_eq!(names(&store, &want), ["Team key", "Ana Max"]);
-
-        store
-            .demote(&key, "Ana Max", None, "kept off by hand")
-            .unwrap();
-        assert_eq!(names(&store, &want), ["Team key"]);
-    }
-
-    #[test]
-    fn a_demotion_on_one_key_leaves_the_owners_other_keys_alone() {
-        let (store, ana, _, key) = two_people();
-        let other = store.issue_key(&ana, "Claude Code").unwrap();
-        store
-            .demote(&key, "Ana Max", Some(now() + 60_000), "refused")
-            .unwrap();
-        let want = Want {
-            person: Some(&ana),
-            key: Some(&other.id),
-            ..Want::from("anthropic")
-        };
-        assert_eq!(names(&store, &want)[0], "Ana Max");
-    }
-
-    #[test]
     fn a_pin_to_an_account_you_cannot_see_is_refused() {
-        let (store, ana, _, key) = two_people();
+        let (store, ana, _) = two_people();
         let want = Want {
             person: Some(&ana),
-            key: Some(&key),
             pinned: Some("Mino Max"),
             ..Want::from("anthropic")
         };
@@ -562,24 +509,5 @@ mod tests {
             candidates(&store, &want),
             Err(PoolError::PinUnavailable { .. })
         ));
-    }
-
-    #[test]
-    fn a_pin_outranks_a_demotion() {
-        let (store, ana, _, key) = two_people();
-        store
-            .demote(&key, "Ana Max", Some(now() + 60_000), "refused")
-            .unwrap();
-        let want = Want {
-            person: Some(&ana),
-            key: Some(&key),
-            pinned: Some("Ana Max"),
-            ..Want::from("anthropic")
-        };
-        assert_eq!(
-            names(&store, &want),
-            ["Ana Max"],
-            "reasoning state belongs to one account; moving it is an error, not a fallback"
-        );
     }
 }

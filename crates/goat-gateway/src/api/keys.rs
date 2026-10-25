@@ -13,8 +13,6 @@ use crate::{
     store::{KeyRow, Viewer},
 };
 
-pub const KEPT_OFF_BY_HAND: &str = "kept off by hand";
-
 fn yours(viewer: &Viewer, key: &KeyRow) -> bool {
     viewer.is_admin()
         || viewer
@@ -92,66 +90,6 @@ pub async fn revoke(
         return *refusal;
     }
     match app.store().revoke_key(&id) {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(error) => failed(error.to_string()),
-    }
-}
-
-pub async fn demotions(
-    State(app): State<App>,
-    Extension(viewer): Extension<Viewer>,
-    Path(id): Path<String>,
-) -> Response {
-    if let Err(refusal) = may_manage(&app, &viewer, &id) {
-        return *refusal;
-    }
-    match app.store().demotions(&id) {
-        Ok(demotions) => Json(json!({ "demotions": demotions })).into_response(),
-        Err(error) => failed(error.to_string()),
-    }
-}
-
-#[derive(Deserialize)]
-pub struct KeepOff {
-    account: String,
-}
-
-pub async fn keep_off(
-    State(app): State<App>,
-    Extension(viewer): Extension<Viewer>,
-    Path(id): Path<String>,
-    Json(body): Json<KeepOff>,
-) -> Response {
-    if let Err(refusal) = may_manage(&app, &viewer, &id) {
-        return *refusal;
-    }
-    let exists = app
-        .store()
-        .accounts()
-        .map(|accounts| accounts.iter().any(|account| account.name == body.account));
-    match exists {
-        Ok(true) => {}
-        Ok(false) => return not_found(format!("no account is called {:?}", body.account)),
-        Err(error) => return failed(error.to_string()),
-    }
-    match app
-        .store()
-        .demote(&id, &body.account, None, KEPT_OFF_BY_HAND)
-    {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(error) => failed(error.to_string()),
-    }
-}
-
-pub async fn use_again(
-    State(app): State<App>,
-    Extension(viewer): Extension<Viewer>,
-    Path((id, account)): Path<(String, String)>,
-) -> Response {
-    if let Err(refusal) = may_manage(&app, &viewer, &id) {
-        return *refusal;
-    }
-    match app.store().undemote(&id, &account) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => failed(error.to_string()),
     }

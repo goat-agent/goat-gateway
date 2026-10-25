@@ -89,7 +89,6 @@ struct Harness {
     store: Store,
     seen: Seen,
     ana_key: String,
-    ana_key_id: String,
 }
 
 async fn harness(carried_host: &str, accounts: bool) -> Harness {
@@ -137,7 +136,6 @@ async fn harness(carried_host: &str, accounts: bool) -> Harness {
         store,
         seen,
         ana_key: issued.secret,
-        ana_key_id: issued.id,
     }
 }
 
@@ -250,10 +248,6 @@ async fn a_refused_request_moves_to_the_next_account_and_parks_nothing() {
         "a refusal of one program's request says nothing about the account"
     );
 
-    let demotions = harness.store.demotions(&harness.ana_key_id).unwrap();
-    assert_eq!(demotions.len(), 1);
-    assert_eq!(demotions[0].account, "Ana Max");
-
     let row = &harness.store.recent_requests(1).unwrap()[0];
     assert_eq!(row.account.as_deref(), Some("Team key"));
     assert_eq!(row.status, "ok");
@@ -270,14 +264,18 @@ async fn a_refused_request_moves_to_the_next_account_and_parks_nothing() {
 }
 
 #[tokio::test]
-async fn after_a_refusal_the_key_tries_that_account_last() {
+async fn a_refusal_is_not_held_against_the_key_that_was_refused() {
     let harness = harness("127.0.0.1", true).await;
     harness.send(&[], false).await;
     harness.seen.calls.lock().unwrap().clear();
 
     let status = harness.send(&[], false).await;
     assert_eq!(status, 200);
-    assert_eq!(harness.seen.credentials(), ["sk-ant-team"]);
+    assert_eq!(
+        harness.seen.credentials(),
+        ["Bearer at_ana_plan", "sk-ant-team"],
+        "a key is a label; it never changes which account is tried first"
+    );
 }
 
 #[tokio::test]

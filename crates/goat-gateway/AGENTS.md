@@ -44,6 +44,8 @@ credentials — then either passes it through or walks a translation path.
 - When it arrives in `x-gateway-key`, the client's own `authorization` or `x-api-key` is a
   **carried** login. It is matched against the providers' `carried` declarations, sent only to
   the hosts declared there, never stored, and refused with a 401 if nobody declared it.
+- A key is a label. It says who is calling and, by convention, which program. It never changes
+  which account serves a request.
 - The console signs people in with sessions (`gws_`, hashed in `sessions`). The admin key opens
   a session that answers for everyone until it is claimed by a person.
 
@@ -52,11 +54,11 @@ credentials — then either passes it through or walks a translation path.
 `pool::candidates` takes a `Want` and returns them in order; `pool::pick` is the first.
 
 - Only accounts the caller owns or that are shared with everyone are candidates.
-- Order: a pin, then accounts this key has not been demoted on, then the caller's own, then the
-  one that served this conversation for this person, then the least quota pressure.
-- A declared refusal (`[[provider.x.refusals]]`) demotes the key on that account for a while and
-  never parks the account. If no byte has reached the client, the request goes once more to the
-  next candidate. One request is one row; earlier attempts are kept in `attempts`.
+- Order: a pin, then the caller's own, then the one that served this conversation for this
+  person, then the least quota pressure.
+- A declared refusal (`[[provider.x.refusals]]`) parks nothing and is not remembered. If no byte
+  has reached the client, the request goes once more to the next candidate. One request is one
+  row; earlier attempts are kept in `attempts`.
 
 - A **pin** must be honoured or the request fails. Reasoning state and turn state belong to one
   account; sending them elsewhere is an error, not a worse answer.
