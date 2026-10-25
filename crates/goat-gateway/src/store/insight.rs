@@ -13,7 +13,7 @@ pub struct Filter {
     pub account: Option<String>,
     pub model: Option<String>,
     pub person: Option<String>,
-    pub client: Option<String>,
+    pub key: Option<String>,
     pub conversation: Option<String>,
     pub status: Option<String>,
     pub search: Option<String>,
@@ -30,7 +30,7 @@ impl Filter {
             account: text("account"),
             model: text("model"),
             person: text("person"),
-            client: text("client"),
+            key: text("key"),
             conversation: text("conversation"),
             status: text("status"),
             search: text("search"),
@@ -59,7 +59,7 @@ impl Filter {
         equals("account", &self.account);
         equals("model", &self.model);
         equals("person", &self.person);
-        equals("client", &self.client);
+        equals("key_id", &self.key);
         equals("conversation", &self.conversation);
         equals("status", &self.status);
         equals("user_id", &self.user_id);
@@ -143,7 +143,7 @@ pub enum By {
     Account,
     Model,
     Person,
-    Client,
+    Key,
     Status,
 }
 
@@ -153,7 +153,7 @@ impl By {
             Some("account") => Self::Account,
             Some("model") => Self::Model,
             Some("person") => Self::Person,
-            Some("client") => Self::Client,
+            Some("key") => Self::Key,
             Some("status") => Self::Status,
             _ => Self::Provider,
         }
@@ -165,7 +165,7 @@ impl By {
             Self::Account => "account",
             Self::Model => "model",
             Self::Person => "person",
-            Self::Client => "client",
+            Self::Key => "key_id",
             Self::Status => "status",
         }
     }
@@ -359,7 +359,6 @@ mod tests {
             id: id.to_owned(),
             started_at: now(),
             person: Some("jmo".into()),
-            client: Some("Claude Code".into()),
             conversation: None,
             provider: provider.to_owned(),
             account: Some(format!("{provider}-1")),
@@ -449,6 +448,28 @@ mod tests {
         assert_eq!(slices[0].key, "anthropic");
         assert_eq!(slices[0].totals.requests, 2);
         assert_eq!(slices[1].totals.errors, 1);
+    }
+
+    #[test]
+    fn usage_splits_by_the_key_each_program_was_given() {
+        let store = store();
+        for (id, key) in [("a", "key-claude"), ("b", "key-claude"), ("c", "key-codex")] {
+            store
+                .record_request(&RequestRow {
+                    key_id: Some(key.to_owned()),
+                    ..row(id, "anthropic", "ok", 10, None)
+                })
+                .unwrap();
+        }
+
+        let slices = store
+            .breakdown(&Filter::default(), By::named(Some(&"key".to_owned())))
+            .unwrap();
+        let split: Vec<(&str, i64)> = slices
+            .iter()
+            .map(|slice| (slice.key.as_str(), slice.totals.requests))
+            .collect();
+        assert_eq!(split, [("key-claude", 2), ("key-codex", 1)]);
     }
 
     #[test]

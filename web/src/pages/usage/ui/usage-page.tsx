@@ -21,6 +21,7 @@ import { GROUPINGS, METRICS, groupingOf, type MetricName, type UsageReport } fro
 import { MetricChart } from "@/widgets/metric-chart";
 import { MetricPicker } from "@/features/pick-metric";
 import { FilterChips, useFilter } from "@/features/filter-requests";
+import { useKeyNames } from "@/entities/user";
 
 const GROUPING_CHOICES = GROUPINGS.map((grouping) => ({ value: grouping, label: `by ${grouping}` }));
 
@@ -30,6 +31,8 @@ export function UsagePage() {
   const [by, setBy] = useState(groupingOf("model"));
   const [chosen, setChosen] = useState<MetricName>("cost");
   const shown = METRICS[chosen];
+  const keyName = useKeyNames();
+  const named = (key: string) => (by === "key" ? keyName(key) : key) || "unattributed";
 
   const report = useResource<UsageReport>(
     `/api/usage${query({ since: Date.now() - span.ms, by, bucket_ms: span.bucket, ...held })}`,
@@ -101,7 +104,7 @@ export function UsagePage() {
               <Row
                 key={slice.key}
                 className={rowHover}
-                title={`Only show ${slice.key || "unattributed"}`}
+                title={`Only show ${named(slice.key)}`}
                 onClick={() => set(by, slice.key)}
               >
                 <td>
@@ -110,7 +113,7 @@ export function UsagePage() {
                       className="size-2.5 shrink-0 rounded-[3px]"
                       style={{ background: seriesColor(by, slice.key) }}
                     />
-                    <span className="max-w-72 truncate">{slice.key || "unattributed"}</span>
+                    <span className="max-w-72 truncate">{named(slice.key)}</span>
                   </span>
                 </td>
                 <td>

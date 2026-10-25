@@ -337,7 +337,6 @@ pub fn opened(incoming: &Incoming, ready: &Ready, record: Option<&Record>) -> Re
         id: incoming.id.clone(),
         started_at: ready.started,
         person: Some(incoming.caller.user_name.clone()),
-        client: crate::messages::client_name(&incoming.headers),
         conversation: ready.conversation.clone(),
         provider: ready.route.provider.clone(),
         account: ready.account.clone(),

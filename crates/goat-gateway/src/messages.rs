@@ -19,12 +19,3 @@ pub async fn count_tokens(
 ) -> Response {
     serve::count_tokens(app, caller, headers, body).await
 }
-
-pub(crate) fn client_name(headers: &HeaderMap) -> Option<String> {
-    let agent = headers.get("user-agent")?.to_str().ok()?;
-    Some(match agent {
-        agent if agent.contains("claude-cli") => "Claude Code".to_owned(),
-        agent if agent.contains("codex") => "Codex".to_owned(),
-        agent => agent.split('/').next().unwrap_or(agent).to_owned(),
-    })
-}

@@ -1,5 +1,6 @@
 import { Body, Cell, Count, Head, Row, Table, rowHover } from "@/shared/ui";
 import { StatusGlyph, formatOf, type Request } from "@/entities/request";
+import { useKeyNames } from "@/entities/user";
 import { duration, moment, money, stamp, tokens, UNKNOWN } from "@/shared/lib/format";
 
 const NARROW = "hidden @3xl:table-cell";
@@ -17,6 +18,7 @@ export function RequestTable({
   selected: string | undefined;
   onSelect: (id: string) => void;
 }) {
+  const keyName = useKeyNames();
   return (
     <Table sticky className="table-fixed">
       <Head>
@@ -25,7 +27,7 @@ export function RequestTable({
           <th className="w-28">Started</th>
           <th>Model</th>
           <th className="w-40">Account</th>
-          <th className={`w-32 ${MIDDLE}`}>Client</th>
+          <th className={`w-32 ${MIDDLE}`}>Key</th>
           <th className={`w-40 ${WIDE}`}>Format</th>
           <Count className={`w-18 ${NARROW}`}>In</Count>
           <Count className={`w-18 ${NARROW}`}>Out</Count>
@@ -59,7 +61,7 @@ export function RequestTable({
             <td className="truncate text-ink-secondary">
               {request.credential === "carried" ? "own login" : (request.account ?? UNKNOWN)}
             </td>
-            <td className={`truncate text-ink-secondary ${MIDDLE}`}>{request.client ?? UNKNOWN}</td>
+            <td className={`truncate text-ink-secondary ${MIDDLE}`}>{keyName(request.key_id) || UNKNOWN}</td>
             <td
               className={`truncate text-mini text-ink-secondary ${WIDE}`}
               title={request.translated ? "the format was translated on the way through" : undefined}

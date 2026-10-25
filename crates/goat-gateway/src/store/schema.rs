@@ -169,4 +169,10 @@ UPDATE accounts SET owner = (SELECT id FROM users)
 DROP TABLE demotions;
 "#,
     ),
+    (
+        "0007_a_request_names_its_key",
+        r#"
+ALTER TABLE requests DROP COLUMN client;
+"#,
+    ),
 ];

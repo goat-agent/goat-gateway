@@ -10,7 +10,7 @@ import { RequestTable } from "@/widgets/request-table";
 import { FilterChips, useFilter } from "@/features/filter-requests";
 import { RequestInspector } from "./request-inspector";
 
-const FIELDS = ["search", "status", "provider", "account", "model", "person", "client"] as const;
+const FIELDS = ["search", "status", "provider", "account", "model", "person", "key"] as const;
 
 const STATUS_CHOICES = [
   { value: "", label: "Any status" },

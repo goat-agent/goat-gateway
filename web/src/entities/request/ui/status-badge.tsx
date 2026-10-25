@@ -59,20 +59,14 @@ export function formatOf(request: Pick<Request, "ingress" | "egress" | "translat
 export function RequestLine({
   request,
   now,
-  showing = "account",
+  aside = request.credential === "carried" ? "own login" : request.account,
   className,
 }: {
   request: Request;
   now: number;
-  showing?: "account" | "client";
+  aside?: string | null;
   className?: string;
 }) {
-  const aside =
-    showing === "client"
-      ? request.client
-      : request.credential === "carried"
-        ? "own login"
-        : request.account;
 
   return (
     <Link

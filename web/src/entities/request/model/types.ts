@@ -4,7 +4,6 @@ export type Request = {
   id: string;
   started_at: number;
   person: string | null;
-  client: string | null;
   conversation: string | null;
   provider: string;
   account: string | null;

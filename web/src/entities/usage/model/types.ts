@@ -21,7 +21,7 @@ export type Slice = { key: string; totals: Totals };
 
 export type Bucket = { at: number; slices: Slice[] };
 
-export const GROUPINGS = ["provider", "model", "account", "person", "client"] as const;
+export const GROUPINGS = ["provider", "model", "account", "person", "key"] as const;
 
 export type Grouping = (typeof GROUPINGS)[number];
 

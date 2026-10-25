@@ -3,11 +3,13 @@ import { CircleAlert } from "lucide-react";
 import { Detail, Fact, Facts, Inspector, Nothing, Properties, Property } from "@/shared/ui";
 import { useHappenings, useResource } from "@/shared/api";
 import { StatusBadge, formatOf, type Attempt, type Request } from "@/entities/request";
+import { useKeyNames } from "@/entities/user";
 import { duration, moment, money, tokens, UNKNOWN } from "@/shared/lib/format";
 
 export function RequestInspector({ id, onClose }: { id: string; onClose: () => void }) {
   const found = useResource<{ request: Request }>(`/api/requests/${encodeURIComponent(id)}`);
   const request = found.data?.request;
+  const keyName = useKeyNames();
 
   const reload = found.reload;
   useHappenings(
@@ -76,7 +78,7 @@ export function RequestInspector({ id, onClose }: { id: string; onClose: () => v
             value={request.credential === "carried" ? "the client's own login" : (request.account ?? UNKNOWN)}
           />
           <Property name="Person" value={request.person ?? UNKNOWN} />
-          <Property name="Client" value={request.client ?? UNKNOWN} />
+          <Property name="Key" value={keyName(request.key_id) || UNKNOWN} />
           <Property name="Format" value={formatOf(request)} />
           <Property name="First byte" value={duration(request.ttft_ms)} />
           <Property name="Took" value={duration(request.duration_ms)} />

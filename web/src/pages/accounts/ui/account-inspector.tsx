@@ -6,7 +6,7 @@ import { ago, day, within } from "@/shared/lib/format";
 import { StateBadge, type Account } from "@/entities/account";
 import { QuotaWindow, type Quota } from "@/entities/provider";
 import { RequestLine, type Request } from "@/entities/request";
-import { useMe, type User } from "@/entities/user";
+import { useKeyNames, useMe, type User } from "@/entities/user";
 import { AccountControls } from "@/features/set-account-state";
 import { HandOver } from "@/features/hand-over-account";
 
@@ -132,6 +132,7 @@ function Left({ quota, account, now }: { quota: Quota | undefined; account: stri
 
 function Latest({ account, now }: { account: string; now: number }) {
   const found = useResource<{ requests: Request[] }>(`/api/requests${query({ account, limit: 8 })}`);
+  const keyName = useKeyNames();
   const reload = found.reload;
   useHappenings(
     useCallback(
@@ -165,7 +166,7 @@ function Latest({ account, now }: { account: string; now: number }) {
       ) : (
         <div className="flex flex-col">
           {requests.map((request) => (
-            <RequestLine key={request.id} request={request} now={now} showing="client" />
+            <RequestLine key={request.id} request={request} now={now} aside={keyName(request.key_id)} />
           ))}
         </div>
       )}
