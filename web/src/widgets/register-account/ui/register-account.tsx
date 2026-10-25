@@ -83,8 +83,9 @@ export function RegisterAccount({
   const yoursFirst = [...people].sort((a, b) =>
     a.value === me?.person.id ? -1 : b.value === me?.person.id ? 1 : 0,
   );
-  const planOwners = admin ? yoursFirst : [];
-  const keyOwners: Choice<string>[] = admin ? [{ value: "everyone", label: "Everyone" }, ...yoursFirst] : [];
+  const together = admin && people.length > 1;
+  const planOwners = together ? yoursFirst : [];
+  const keyOwners: Choice<string>[] = together ? [{ value: "everyone", label: "Everyone" }, ...yoursFirst] : [];
   const whose = owner || planOwners[0]?.value || "";
 
   const reset = () => {

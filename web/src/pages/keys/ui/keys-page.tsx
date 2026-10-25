@@ -98,7 +98,7 @@ export function KeysPage() {
     >
       <IssueKey
         open={issuing}
-        people={admin ? people : []}
+        people={admin && people.length > 1 ? people : []}
         onClose={() => setIssuing(false)}
         onIssued={keys.reload}
       />
