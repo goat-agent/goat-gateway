@@ -256,6 +256,10 @@
   }
 }
 
+@utility inspector-motion {
+  animation: inspector-in var(--speed-regular) var(--ease-out-quint);
+}
+
 @layer components {
   [data-slot="toast"] {
     --gap: 8px;
@@ -340,5 +344,12 @@
 @keyframes toast-bump {
   50% {
     transform: scale(1.03);
+  }
+}
+
+@keyframes inspector-in {
+  from {
+    opacity: 0;
+    transform: translateX(12px);
   }
 }

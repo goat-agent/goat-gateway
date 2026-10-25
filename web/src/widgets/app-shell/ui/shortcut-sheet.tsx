@@ -11,6 +11,12 @@ const GENERAL: readonly Shortcut[] = [
   { label: "Close whatever is open", keys: ["Esc"] },
 ];
 
+const LISTS: readonly Shortcut[] = [
+  { label: "Open the next row", keys: ["J"] },
+  { label: "Open the previous row", keys: ["K"] },
+  { label: "Close the detail", keys: ["Esc"] },
+];
+
 export function ShortcutSheet() {
   const going: readonly Shortcut[] = usePlaces().map((place) => ({
     label: `Go to ${place.label}`,
@@ -30,6 +36,7 @@ export function ShortcutSheet() {
     >
       <div className="flex flex-col gap-5">
         <Listing title="General" shortcuts={GENERAL} />
+        <Listing title="Lists" shortcuts={LISTS} />
         <Listing title="Navigation" shortcuts={going} />
       </div>
     </Dialog>

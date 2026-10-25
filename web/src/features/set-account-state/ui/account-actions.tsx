@@ -1,4 +1,4 @@
-import { ChartColumn, Ellipsis, Power, PowerOff, RotateCcw, Trash2, Zap } from "lucide-react";
+import { ChartColumn, Ellipsis, Power, PowerOff, RotateCcw, Rows3, Trash2, Zap } from "lucide-react";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { drop, send } from "@/shared/api";
@@ -30,10 +30,11 @@ function read(reached: Reached): Answer {
       };
 }
 
-function useAccountActions(account: Account, onChanged: () => void) {
+function useAccountActions(account: Account, onChanged: () => void, onRemoved?: () => void) {
   const navigate = useNavigate();
   const [trying, setTrying] = useState(false);
   const at = `/api/accounts/${encodeURIComponent(account.name)}`;
+  const named = encodeURIComponent(account.name);
 
   const test = () => {
     setTrying(true);
@@ -74,6 +75,7 @@ function useAccountActions(account: Account, onChanged: () => void) {
     drop(at)
       .then(() => {
         toast(`Removed ${account.name}`, { says: "Its credential is deleted." });
+        onRemoved?.();
         onChanged();
       })
       .catch((error: Error) =>
@@ -81,9 +83,10 @@ function useAccountActions(account: Account, onChanged: () => void) {
       );
   };
 
-  const showUsage = () => navigate(`/usage?account=${encodeURIComponent(account.name)}`);
+  const showUsage = () => navigate(`/usage?account=${named}`);
+  const showRequests = () => navigate(`/requests?account=${named}`);
 
-  return { trying, test, setState, remove, showUsage };
+  return { trying, test, setState, remove, showUsage, showRequests };
 }
 
 export function AccountMenuItems({
@@ -93,12 +96,18 @@ export function AccountMenuItems({
   account: Account;
   onChanged: () => void;
 }) {
-  const { trying, test, setState, remove, showUsage } = useAccountActions(account, onChanged);
+  const { trying, test, setState, remove, showUsage, showRequests } = useAccountActions(
+    account,
+    onChanged,
+  );
 
   return (
     <>
       <MenuItem icon={Zap} disabled={trying} onClick={test}>
         {trying ? "Trying…" : "Send a test request"}
+      </MenuItem>
+      <MenuItem icon={Rows3} onClick={showRequests}>
+        Show its requests
       </MenuItem>
       <MenuItem icon={ChartColumn} onClick={showUsage}>
         Show its usage
@@ -123,30 +132,57 @@ export function AccountMenuItems({
   );
 }
 
-export function AccountActions({
+export function AccountControls({
   account,
   onChanged,
+  onRemoved,
 }: {
   account: Account;
   onChanged: () => void;
+  onRemoved: () => void;
 }) {
-  const { trying, test } = useAccountActions(account, onChanged);
+  const { trying, test, setState, remove, showUsage } = useAccountActions(
+    account,
+    onChanged,
+    onRemoved,
+  );
 
   return (
-    <span className="flex items-center justify-end gap-1">
-      <Button tone="ghost" size="small" disabled={trying} onClick={test}>
+    <>
+      <Button disabled={trying} onClick={test}>
         <Zap strokeWidth={1.75} />
         {trying ? "Trying…" : "Test"}
       </Button>
+      {account.state === "active" ? (
+        <Button onClick={() => void setState("disabled")}>
+          <PowerOff strokeWidth={1.75} />
+          Turn off
+        </Button>
+      ) : (
+        <Button onClick={() => void setState("active")}>
+          {account.state === "sign_in_expired" ? (
+            <RotateCcw strokeWidth={1.75} />
+          ) : (
+            <Power strokeWidth={1.75} />
+          )}
+          {account.state === "sign_in_expired" ? "Try again" : "Turn on"}
+        </Button>
+      )}
       <Menu
         trigger={
-          <Button tone="ghost" size="icon" aria-label={`More for ${account.name}`}>
+          <Button size="icon" aria-label={`More for ${account.name}`}>
             <Ellipsis strokeWidth={1.75} />
           </Button>
         }
       >
-        <AccountMenuItems account={account} onChanged={onChanged} />
+        <MenuItem icon={ChartColumn} onClick={showUsage}>
+          Show its usage
+        </MenuItem>
+        <MenuSeparator />
+        <MenuItem icon={Trash2} danger onClick={() => void remove()}>
+          Remove…
+        </MenuItem>
       </Menu>
-    </span>
+    </>
   );
 }

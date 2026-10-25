@@ -1,1 +1,1 @@
-export { AccountActions, AccountMenuItems } from "./ui/account-actions";
+export { AccountControls, AccountMenuItems } from "./ui/account-actions";

@@ -58,6 +58,22 @@ export function moment(at: number | null | undefined, now = Date.now()) {
   return sameDay(at, now) ? clock(at) : `${day(at)} ${clock(at)}`;
 }
 
+export function dayOrClock(at: number | null | undefined, now = Date.now()) {
+  if (!at) return UNKNOWN;
+  return sameDay(at, now) ? clock(at) : day(at);
+}
+
+export function stamp(at: number | null | undefined, now = Date.now()) {
+  if (!at) return UNKNOWN;
+  if (sameDay(at, now)) return clock(at);
+  const time = new Date(at).toLocaleTimeString("en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  return `${day(at)} ${time}`;
+}
+
 export function ago(at: number | null | undefined, now = Date.now()) {
   if (!at) return UNKNOWN;
   return `${spanOf(Math.max(0, now - at))} ago`;
